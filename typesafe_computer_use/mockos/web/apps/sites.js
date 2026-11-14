@@ -93,6 +93,13 @@
       ),
       Sites.link(`Cart (${count})`, "/cart", go),
     );
+    const categories = [...new Set(s.products.map((p) => p.category))].sort();
+    const nav = h("div", { class: "site-nav" }, categories.map((c) => Sites.link(c, `/search?q=${encodeURIComponent(c)}`, go)), Sites.link("Offers", "/offers", go), Sites.link("Gift cards", "/gift-cards", go));
+    const footer = h(
+      "div",
+      { class: "site-foot" },
+      ["About us", "Delivery", "Returns", "Contact", "Careers", "Privacy policy", "Terms", "Store finder"].map((label) => Sites.link(label, `/${label.toLowerCase().replace(/ /g, "-")}`, go)),
+    );
     const rows = (products) =>
       h(
         "div",
@@ -170,8 +177,9 @@
       "div",
       { class: "site shop" },
       header,
+      nav,
       s.notice ? h("div", { class: "notice" }, s.notice) : null,
-      h("div", { class: "site-body" }, body),
+      h("div", { class: "site-body" }, body, footer),
       s.banner
         ? h(
             "div",
