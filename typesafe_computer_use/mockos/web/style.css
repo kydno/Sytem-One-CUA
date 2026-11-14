@@ -232,3 +232,7 @@ input, textarea { font: inherit; color: inherit; caret-color: transparent; }
 .nmeta { display: flex; gap: 8px; font-size: 12px; white-space: nowrap; overflow: hidden; }
 .neditor { flex: 1; padding: 14px 18px; display: flex; }
 .neditor .area { flex: 1; border: none; font-size: 14px; line-height: 20px; padding: 4px; }
+.bookmarks { height: 30px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 10px; border-bottom: 1px solid #ddd; background: #fff; }
+.bookmark { height: 22px; padding: 0 9px; border-radius: 11px; border: 1px solid #d5d7db; display: flex; align-items: center; font-size: 12px; }
+.site-nav { display: flex; gap: 18px; padding: 8px 32px; border-bottom: 1px solid #eee; }
+.site-foot { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 40px; padding-top: 14px; border-top: 1px solid #ddd; max-width: 980px; }

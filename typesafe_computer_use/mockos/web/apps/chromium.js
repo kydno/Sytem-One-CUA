@@ -29,6 +29,17 @@ const Sites = (function () {
 (function () {
   const { h, own } = Kit;
   const BLANK = "about:newtab";
+  // A bookmarks bar, as most browsers show one: three of these are the mock's sites, the rest lead nowhere.
+  const BOOKMARKS = [
+    ["Corner Shop", "https://shop.mockos.example/"],
+    ["Stagefront", "https://tickets.mockos.example/"],
+    ["Mockipedia", "https://wiki.mockos.example/"],
+    ["Bank", "https://bank.mockos.example/"],
+    ["Recipes", "https://recipes.mockos.example/"],
+    ["Weather", "https://weather.mockos.example/"],
+    ["Team wiki", "https://intranet.mockos.example/"],
+    ["Photos", "https://photos.mockos.example/"],
+  ];
 
   function parse(url) {
     try {
@@ -184,6 +195,11 @@ const Sites = (function () {
             },
           }),
         ),
+      ),
+      h(
+        "div",
+        { class: "bookmarks", role: "toolbar", "aria-label": "Bookmarks" },
+        BOOKMARKS.map(([label, url]) => h("div", { class: "bookmark", role: "button", "aria-label": label, onclick: own(() => MockOS.dispatch({ type: "chromium.go", url })) }, label)),
       ),
       h("div", { class: tab.loading ? "progress on" : "progress" }),
       h("div", { class: "page", key: `page-${tab.id}-${tab.url}`, style: "position:relative" }, page(state, tab)),
