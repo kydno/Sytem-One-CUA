@@ -12,6 +12,7 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageStat
 
+from .ax_walk import AX_MODAL
 from .config import MAX_OPTIONS, MIN_OCR_CONFIDENCE
 from .models import MENU_BAR_PT, AxNode, Box, Item, Screen, tab_title
 from .platform_adapter import desktop
@@ -22,6 +23,9 @@ ECHO_CHARS = 24
 MIN_BOX_OVERLAP = 0.5  # intersection over the smaller box
 MIN_TOKEN_OVERLAP = 0.5
 ICON_HOSTS = {"button", "link"}  # one target each; a tab or a row holds others, such as its close box
+TWIN_ROLES = frozenset({"button", "link"})  # the controls a line of text that drifted off its element is pressed through
+DRIFT_PT = 120.0  # how far up or down a page may have moved between the capture and the accessibility walk
+MIN_TWIN_LABEL = 3  # a shorter label is held by too much text to say which line it is
 
 # OCR costs about two thirds of a step, and it scales with the amount of text, so the way to make it
 # cheaper is to read less of the screen: the frontmost window's own columns instead of the display,
@@ -89,6 +93,41 @@ def is_echo(text: str, echoes: set[str]) -> bool:
     return any(e in norm for e in echoes)
 
 
+def without_wrapped_echo(lines: list[Line], goal: str) -> list[Line]:
+    """The lines, less a goal shown in pieces over several of them, as a chat that just sent it shows it.
+
+    `is_echo` finds the goal in one line, by a stretch of ECHO_CHARS. A chat shows a goal it was sent in a code
+    block, and OCR reads a goal such as "check how much is left on my plan" there as pieces too short to hold
+    that stretch: "check how much is" and "left on my plan", wrapped one under the other, or side by side where
+    the text recognizer split one row. On a run started from such a chat, the classifier clicked the pieces,
+    then typed into the chat. A line that is only a run of the goal's own words is dropped when it and the
+    lines that carry on from it, to its right on the same row or under it with the left edge it started at,
+    join into the goal. One such line alone is page text that shares the goal's words, as a filter reading
+    "under a week" does for a goal that asks for delivery in under a week, and stays.
+    """
+    words = _words(goal)
+    echoes = goal_echoes(goal)
+    pieces = [k for k, (text, _, _) in enumerate(lines) if _holds_words(words, _words(text))]
+    dropped: set[int] = set()
+    for first in pieces:
+        chain, row_x = [first], lines[first][2][0]
+        while True:
+            prev = lines[chain[-1]][2]
+            tall = prev[3] - prev[1]
+            rest = [k for k in pieces if k not in chain]
+            beside = [k for k in rest if abs(lines[k][2][1] - prev[1]) <= tall / 2 and 0 <= lines[k][2][0] - prev[2] <= tall]
+            under = [k for k in rest if 0 <= lines[k][2][1] - prev[3] <= tall and abs(lines[k][2][0] - row_x) <= tall]
+            if not beside and not under:
+                break
+            chain.append((beside or under)[0])
+            if not beside:
+                row_x = lines[chain[-1]][2][0]
+            if is_echo(" ".join(lines[k][0] for k in chain), echoes):
+                dropped.update(chain)
+                break
+    return [line for k, line in enumerate(lines) if k not in dropped]
+
+
 def perceive(
     screen: Screen,
     budget: int,
@@ -119,6 +158,8 @@ def perceive(
         blocks = ocr(screen, budget, goal, cache, timing, apart)
     with phase(timing, "ax"):
         nodes, hidden = ax_nodes(screen, budget)
+        modals = [node for node in nodes if node.role == AX_MODAL]
+        nodes = [node for node in nodes if node.role != AX_MODAL]
         gray = screen.image.convert("L")
         blank = [node for node in nodes if not drawn(gray, node, screen.scale)]
         nodes = [node for node in nodes if node not in blank]
@@ -134,11 +175,20 @@ def perceive(
     ]
     held = {id(block) for block in content}
     rest = [
-        block for block in blocks if id(block) not in held and not in_field(block, screen) and not link_preview(block, screen)
+        block
+        for block in blocks
+        if id(block) not in held
+        and not in_field(block, screen)
+        and not link_preview(block, screen)
+        and not behind_a_modal(block, modals, screen.scale)
     ]
     merged = merge_with_origins(rest, controls, budget, content)
     screen.ax_refs.clear()
     screen.ax_refs.update({it.index: nodes[origin].ref for it, origin in merged if origin is not None and nodes[origin].ref})
+    for it, origin in merged:
+        twin = drifted_twin(it, blank, screen.scale) if origin is None else None
+        if twin is not None:
+            screen.ax_refs[it.index] = twin.ref
     screen.covered.clear()
     screen.covered.update(
         {it.index: nodes[origin].covered_by for it, origin in merged if origin is not None and nodes[origin].covered_by}
@@ -173,9 +223,9 @@ def ocr(
         if ahead is not None:
             timing[OCR_AHEAD] = round(ahead.seconds, 3)
     echoes = goal_echoes(goal)
-    kept: list[Line] = [
-        (t.strip(), c, b) for t, c, b in lines if t.strip() and c >= MIN_OCR_CONFIDENCE and not is_echo(t, echoes)
-    ]
+    kept: list[Line] = without_wrapped_echo(
+        [(t.strip(), c, b) for t, c, b in lines if t.strip() and c >= MIN_OCR_CONFIDENCE and not is_echo(t, echoes)], goal
+    )
     held = [line for line in kept if apart and in_text_area(screen, line[2])]
     held_ids = {id(line) for line in held}
     return to_items(merge_blocks([line for line in kept if id(line) not in held_ids]) + held, budget)
@@ -567,7 +617,9 @@ def ax_nodes(screen: Screen, budget: int) -> tuple[list[AxNode], list[AxNode]]:
         nodes, hidden, _capped = desktop.actionable_elements(screen.pid, width_pt, height_pt)
     except Exception:
         return [], []
-    return [node for node in nodes[:budget] if node.label], [node for node in hidden if node.label]
+    controls = [node for node in nodes if node.role != AX_MODAL]
+    modals = [node for node in nodes if node.role == AX_MODAL]  # no control, so outside the budget
+    return [node for node in controls[:budget] if node.label] + modals, [node for node in hidden if node.label]
 
 
 def drawn(image: Image.Image, node: AxNode, scale: float) -> bool:
@@ -630,6 +682,47 @@ def _holds(outer: AxNode, inner: AxNode) -> bool:
         and outer.x + outer.w >= inner.x + inner.w
         and outer.y + outer.h >= inner.y + inner.h
     )
+
+
+def drifted_twin(item: Item, blank: list[AxNode], scale: float) -> AxNode | None:
+    """The link or button a line of page text belongs to, when the page moved between the capture and the
+    accessibility walk: the control's frame is where the page has it now, over nothing on the capture, so it
+    was dropped as not drawn, and the text the capture shows is plain text with no element behind it.
+
+    On a billing page still laying out after it opened, a row of late content pushed everything below it
+    down by a line. The capture showed a link where the walk, a moment later, found the page's big
+    buy button, and placed the link's own frame over empty page below. A click on the link's text,
+    aimed from the capture, opened the purchase dialog. The press goes to the element, wherever it is now.
+
+    A twin is a pressable link or button whose label the text holds word for word (or that holds the text so), with
+    both at least MIN_TWIN_LABEL long, in the same column
+    and within DRIFT_PT up or down. Two such candidates are one too many to choose between, so there is none.
+    """
+    text = _words(item.text)
+    if len(" ".join(text)) < MIN_TWIN_LABEL:
+        return None
+    x1, y1, x2, y2 = item.x1 / scale, item.y1 / scale, item.x2 / scale, item.y2 / scale
+    found = [
+        node
+        for node in blank
+        if node.ref is not None
+        and node.pressable
+        and node.role_word in TWIN_ROLES
+        and len(" ".join(label := _words(node.label))) >= MIN_TWIN_LABEL
+        and (_holds_words(text, label) or _holds_words(label, text))
+        and min(x2, node.x + node.w) > max(x1, node.x)
+        and abs((node.y + node.h / 2) - (y1 + y2) / 2) <= DRIFT_PT
+    ]
+    return found[0] if len(found) == 1 else None
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"\w+", text.lower())
+
+
+def _holds_words(outer: list[str], inner: list[str]) -> bool:
+    """Whether `inner` runs whole, word for word, somewhere in `outer`: "add" is in "add funds", not in "address"."""
+    return bool(inner) and any(outer[i : i + len(inner)] == inner for i in range(len(outer) - len(inner) + 1))
 
 
 def offscreen_controls(nodes: list[AxNode], items: list[Item]) -> list[AxNode]:
@@ -720,7 +813,7 @@ def to_ax_items(nodes: list[AxNode], scale: float) -> list[Item]:
 
 def ax_items(screen: Screen, budget: int) -> list[Item]:
     """The frontmost app's labelled on-screen controls as items on the capture."""
-    return to_ax_items(ax_nodes(screen, budget)[0], screen.scale)
+    return to_ax_items([node for node in ax_nodes(screen, budget)[0] if node.role != AX_MODAL], screen.scale)
 
 
 def merge_sources(ocr_items: list[Item], ax_items: list[Item], budget: int = MAX_OPTIONS) -> list[Item]:
@@ -760,6 +853,25 @@ def merge_with_origins(
     kept = [merged[i] for i in kept_by_budget([it for it, _ in merged], budget)]
     order = reading_order([it for it, _ in kept])
     return [(replace(kept[j][0], index=i), kept[j][1]) for i, j in enumerate(order)]
+
+
+def behind_a_modal(block: Item, modals: list[AxNode], scale: float) -> bool:
+    """Whether this line lies on a page a modal dialog covers, outside the dialog: under its backdrop.
+
+    It is no item. A click there lands on the backdrop, which closes the dialog and drops every choice
+    made in it but not yet applied: runs/20261115-172219 clicked a badge on a card behind a filter
+    dialog three times, and lost the choices made in the dialog each time.
+    """
+    x, y = (block.x1 + block.x2) / 2 / scale, (block.y1 + block.y2) / 2 / scale
+    for modal in modals:
+        if modal.page is None:
+            continue
+        px, py, pw, ph = modal.page
+        on_page = px <= x < px + pw and py <= y < py + ph
+        in_dialog = modal.x <= x < modal.x + modal.w and modal.y <= y < modal.y + modal.h
+        if on_page and not in_dialog:
+            return True
+    return False
 
 
 def covered_by_a_control(block: Item, controls: list[Item]) -> bool:

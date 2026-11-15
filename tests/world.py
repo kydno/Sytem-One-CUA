@@ -146,7 +146,7 @@ class World:
         self.apart: list[bool] = []  # whether each step's perception was told to keep a text area's lines apart
         self.asked: list[str] = []  # the questions the writer put to the user
         self.loading = {p.name: p.loads_in for p in pages}
-        self.ticks = 0  # captures taken so far, so a page can show something that moves on its own
+        self.ticks = 0  # captures taken so far, the one showing included, so a page can show something that moves on its own
         self._refs: dict[str, Ref] = {}  # action -> the element, so a ref stays the same object
         self._fields: dict[str, Ref] = {}  # label -> the field's element
 
@@ -213,8 +213,10 @@ class World:
         """What `perception.capture` would return for the page now showing.
 
         Each capture is a tick, so a page whose rows are a callable can move between steps without
-        moving inside one: every other read of the screen in the same step sees the same rows.
+        moving inside one: every other read of the screen in the same step, a screenshot taken before a
+        click among them, sees the same rows the capture drew.
         """
+        self.ticks += 1
         nodes = [
             AxNode(role="AXLink", label=lbl, x=0.0, y=OFFSCREEN_Y, w=120.0, h=32.0, pressable=True, ref=self._ref(f"press:{lbl}"))
             for lbl in self.page.offscreen
@@ -229,7 +231,6 @@ class World:
             window=None,
             offscreen=nodes,
         )
-        self.ticks += 1
         return screen
 
     def drawn(self) -> Image.Image:
@@ -459,8 +460,10 @@ class FakeTypeSafe:
         shortcuts: Callable[[dict], str] | None = None,
         plan: bool = False,
         changes: Callable[[dict], float] | None = None,
+        shown: Callable[[dict], float] | None = None,
     ):
         self.policy = policy
+        self.shown = shown  # how the answer-shown question is answered, from the step's state; never yes without one
         self.changes = changes  # how the changes-something question is answered, from its state; nothing changes without one
         self.change_states: list[dict] = []  # the state each changes-something question was sent
         self.plan = plan  # how the goal-needs-a-plan question is answered: closed unless a scenario opens it
@@ -493,7 +496,7 @@ class FakeTypeSafe:
         if "changes" in questions:
             self.change_states.append(state)
             return SimpleNamespace(answers={"changes": SimpleNamespace(noul=self.changes(state) if self.changes else 0.0)})
-        if any(isinstance(q, Noul) for q in questions.values()):
+        if "kind" not in questions and any(isinstance(q, Noul) for q in questions.values()):
             return SimpleNamespace(answers={name: SimpleNamespace(noul=self.noul) for name in questions})
         if set(questions) == {"target"}:  # the follow-up to a drag_item: where it is dropped, named by text
             self.asked.append(questions)
@@ -532,6 +535,8 @@ class FakeTypeSafe:
         if "offscreen" in questions:
             key = self._offscreen_key(state, target) if kind == "press_offscreen" else "0"
             answers["offscreen"] = _answer(key, confidence)
+        if "shown" in questions:
+            answers["shown"] = SimpleNamespace(noul=self.shown(state) if self.shown else 0.0)
         return answers
 
     @staticmethod
@@ -607,7 +612,7 @@ class FakeWriter:
             reply = {"ok": bool(self.plan), "plan": self.plan}
         elif asked == {"ok", "url", "reason"}:
             reply = {"ok": bool(self.url), "url": self.url, "reason": "the goal names the site"}
-        elif asked == {"achieved", "answer", "focus", "question", "wait", "scroll", "scroll_over"}:
+        elif asked == {"achieved", "answer", "focus", "then", "question", "wait", "scroll", "scroll_over"}:
             self.packets.append(packet)
             earlier = [text for screen in packet.get("earlier_screens", []) for text in screen["text"]]
             scripted = self.reviews.pop(0) if self.reviews else {}
@@ -616,6 +621,7 @@ class FakeWriter:
                 "achieved": not scripted,
                 "answer": " ".join(packet["screen_text_in_reading_order"] + earlier),
                 "focus": "",
+                "then": [],
                 "question": "",
                 "wait": False,
                 "scroll": "",
@@ -647,6 +653,7 @@ def drive(
     plan: bool = False,
     permissions: str = "full",
     changes: Callable[[dict], float] | None = None,
+    shown: Callable[[dict], float] | None = None,
 ) -> RunState:
     """Run the real loop against the world until it stops itself. `world.fake` holds the classifier.
 
@@ -655,7 +662,7 @@ def drive(
     With `events`, the run reports there, as `clicker --events` does, and the replies come from it.
     """
     world.install(monkeypatch)
-    fake = FakeTypeSafe(policy, noul, read_only, moves, shortcuts, plan, changes)
+    fake = FakeTypeSafe(policy, noul, read_only, moves, shortcuts, plan, changes, shown)
     world.fake = fake
     monkeypatch.setattr(runner, "DecisionClient", lambda: fake)
     cfg = RunConfig(goal=goal, out=tmp_path / "run", act=act, steps=steps, delay=0, permissions=permissions)

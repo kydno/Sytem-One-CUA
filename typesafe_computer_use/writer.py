@@ -170,12 +170,12 @@ def checked(data: dict, properties: dict) -> dict:
     """The reply with each field of its schema's type. Anthropic enforces the schema itself; another
     endpoint may leave a field out or send a string where a flag belongs. A flag decides what happens
     next, so one missing is an error. A missing string is empty, which every caller reads as nothing
-    to type, open, or say."""
+    to type, open, or say, and a missing list is empty."""
     out = dict(data)
     for name, spec in properties.items():
-        if spec["type"] == "string" and name not in out:
-            out[name] = ""
-        if not isinstance(out.get(name), {"boolean": bool, "string": str}[spec["type"]]):
+        if spec["type"] in ("string", "array") and name not in out:
+            out[name] = "" if spec["type"] == "string" else []
+        if not isinstance(out.get(name), {"boolean": bool, "string": str, "array": list}[spec["type"]]):
             raise WriterError(f"the writer's reply has no {spec['type']} {name!r}: {json.dumps(data)[:400]}")
     return out
 
@@ -445,6 +445,10 @@ PLAN_SYSTEM = (
     "first conversation in the list' or 'Go back to the list'. Repeat a pair of steps for the next item in "
     "words, such as 'Do the same for the next conversation down, until five are opened', rather than listing "
     "each. The steps only visit what the goal needs; the reading and comparing is the reviewer's. When "
+    "the goal asks for things that meet criteria a site's own search can filter on, such as a price range, "
+    "a rating, a size, or a count, plan through that site: open it, search there, and set each criterion "
+    "in its filters, then open the results. A web search for single pages matches words, not criteria, "
+    "and most of what it finds falls short. When "
     "earlier_tasks are given, they are what the user asked before in the same session, and the goal may "
     "lean on them. Plain text, one step per line. Set ok to false when the goal needs one place only, or "
     "when no plan would help."
@@ -479,10 +483,21 @@ class Answer:
     text: str
     achieved: bool  # whether the screen itself shows the goal reached, in the writer's judgement
     focus: str = ""  # the next sub-goal for the classifier, in terms of the screen
+    then: tuple[str, ...] = ()  # the moves after the focus, each on an item this screen already shows (see `run`)
     question: str = ""  # what only the user can say
     wait: bool = False  # the screen is still loading, so the run waits for it instead of asking the classifier to
     scroll: str = ""  # "up" or "down" once, "top" or "bottom" until nothing moves; the run scrolls itself
     scroll_over: str = ""  # the text of the item to scroll over; empty for the window's center
+
+
+MAX_THEN = 6  # moves queued after a focus: enough for a panel of filters and its apply button
+
+
+def queued_moves(moves: object) -> tuple[str, ...]:
+    """The writer's `then`, kept to MAX_THEN non-empty moves; a model that gave none, or no list, queues none."""
+    if not isinstance(moves, list):
+        return ()
+    return tuple(move.strip() for move in moves if isinstance(move, str) and move.strip())[:MAX_THEN]
 
 
 ANSWER_SYSTEM = (
@@ -535,6 +550,16 @@ ANSWER_SYSTEM = (
     "memory that a setting, feature, or page does not exist: apps move and rename them between "
     "versions. While the screen still shows a place to look, such as a search result, a row "
     "marked as matching, a menu, or a section not yet opened, give opening it as the focus. "
+    "When the goal sets criteria the site's own search can filter on, use its filters to narrow the "
+    "results rather than a web search for single pages, which matches words, not criteria. "
+    "Typing goes only into the focused field: when focused_field is not the field to type into, the "
+    "focus is clicking that field, quoting its name, and the typing is the move in then, quoting the "
+    "text to type. "
+    "Set then to the moves after the focus, in order, when each one uses an item this screen already "
+    "shows, such as the other choices in an open filter panel and the button that applies them: the "
+    "classifier makes them one by one, and you read the screen once, after the last. Each is a focus of its "
+    "own: one short imperative sentence, one move. Leave then empty when the next move depends on what "
+    "the focus will bring up. "
     "Do not give again a focus from earlier_stops that changed "
     "nothing. Set question to ask the user, only when user_can_be_asked is true, and only for what "
     "the screens cannot tell you, the goal leaves open, and earlier_tasks do not settle: a choice "
@@ -609,6 +634,7 @@ def compose_answer(
         **({"what_the_run_may_do": may_do} if may_do else {}),
         "frontmost_app": screen.app,
         "browser_active_tab_url": screen.url,
+        "focused_field": screen.field.summary() if screen.field else None,
         "screen_text_in_reading_order": [
             f"{it.text} (under {screen.covered[it.index].title})" if it.index in screen.covered else it.text for it in items
         ],
@@ -622,6 +648,7 @@ def compose_answer(
             "achieved": {"type": "boolean"},
             "answer": {"type": "string"},
             "focus": {"type": "string"},
+            "then": {"type": "array", "items": {"type": "string"}},
             "question": {"type": "string"},
             "wait": {"type": "boolean"},
             "scroll": {"type": "string"},
@@ -634,7 +661,8 @@ def compose_answer(
     return Answer(
         text=data["answer"].strip(),
         achieved=data["achieved"],
-        focus=data["focus"].strip(),
+        focus=(focus := data["focus"].strip()),
+        then=queued_moves(data.get("then")) if focus else (),
         question=data["question"].strip(),
         wait=data["wait"],
         scroll=scroll if (scroll := data["scroll"].strip().lower()) in SCROLLS else "",

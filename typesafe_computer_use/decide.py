@@ -53,7 +53,9 @@ DRAG = (
     "follows): to move a file into a folder, reorder a list or the tabs, or drop something on a place. Not "
     "for a slider or a map, and not when a menu or a button on screen does the same."
 )
-SPARED = {"item": ("click_item", *POINTING, "drag_item"), "offscreen": ("press_offscreen",)}
+# A question the model may refuse, and the kinds that cannot go ahead without it. No kind needs `shown`: refused, the
+# step goes on as it would have without it.
+SPARED = {"item": ("click_item", *POINTING, "drag_item"), "offscreen": ("press_offscreen",), "shown": ()}
 GATED_KINDS = frozenset({"press_shortcut", *POINTING, "drag_item"})  # offered only to a run whose goal needs the moves
 PRESS_OFFSCREEN = (
     "Activate a labelled control that the app exposes but that is not currently visible on screen "
@@ -312,6 +314,7 @@ class Decision:
     shortcut: ChoiceAnswer | None = None  # asked only once press_shortcut is chosen
     target: ChoiceAnswer | None = None  # asked only once drag_item is chosen: the item the dragged one is dropped on
     refused: str | None = None  # a question the model refused, so the step was decided without it
+    shown: float | None = None  # asked only on a goal that only looks: the chance this screen already shows the answer
 
     @property
     def clicking(self) -> bool:
@@ -452,6 +455,7 @@ def decide(
     browsers: Sequence[str] = (),
     apps: Sequence[str] = (),
     moves: bool = False,
+    looking: bool = False,
 ) -> Decision:
     """One request for the step's decision, and a second, small one for the app only when the first
     chose open_app: the list of installed apps is long, and most steps open none. A shortcut is asked
@@ -464,8 +468,13 @@ def decide(
     the same way, and only pressing one of those controls needs it. The item labels are pointers to the
     state's rows now (`Item N.`) and the screen text sits in the state, so whether Luna still refuses this
     question has not been measured; the fallback stays until it has.
+
+    `looking`, for a goal that only finds something out, adds `answer_shown` to the same request, so
+    it costs no call of its own.
     """
     questions = build_questions(screen, items, browser, email, guidance, browsers, apps, moves)
+    if looking:
+        questions["shown"] = answer_shown()
     state = base_state(goal, screen, items, history, tried, guidance, moves)
     refused = None
     try:
@@ -526,6 +535,23 @@ def decide(
         shortcut=shortcut,
         target=target,
         refused=refused,
+        shown=answers["shown"].noul if "shown" in answers else None,
+    )
+
+
+def answer_shown() -> Noul:
+    """Whether the screen already shows what a goal that only looks asks to find out.
+
+    The kind question offers done among the moves, and a move that matches the goal's words wins it:
+    asked for what was left on an account, on the page whose balance said so, done got 0.01 and a link
+    named with the goal's word for it got the click, and two more pages after it. Asked on its own, the
+    question does not compete with a click; a yes hands the screen to the writer, which reads it.
+    """
+    return Noul(
+        instructions=(
+            "Does this screen already show what the goal asks to find out, so that a person could read the "
+            "answer off it now, without another click? A link or a heading that names the topic is not the answer."
+        )
     )
 
 

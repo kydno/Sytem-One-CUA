@@ -6,6 +6,7 @@ from conftest import busy_page
 from PIL import Image, ImageDraw
 
 from typesafe_computer_use import perception
+from typesafe_computer_use.ax_walk import AX_MODAL
 from typesafe_computer_use.models import AxNode, Field, Item, KeyboardFocus, Popup, Screen, same_screen, signature
 from typesafe_computer_use.perception import (
     drawn,
@@ -16,6 +17,7 @@ from typesafe_computer_use.perception import (
     merge_sources,
     order_items,
     to_items,
+    without_wrapped_echo,
 )
 from typesafe_computer_use.platform_adapter import desktop
 from typesafe_computer_use.runner import keys_desc
@@ -64,6 +66,40 @@ def test_goal_echo_matches_wrapped_command_lines():
     assert is_echo('clear && uv run clicker "go to cnn and click onto something', echoes)
     assert is_echo('related to AI on the homepage" --act', echoes)
     assert not is_echo("Trending: Trump and AI warnings", echoes)
+
+
+PLAN_GOAL = "check how much is left on my plan"
+
+
+def test_a_goal_wrapped_over_stacked_lines_is_dropped_whole():
+    """Run 20261114-134815: the goal, wrapped in a chat's code block, was clicked line by line."""
+    lines = [
+        line("Type this into the panel:", 100, 100, 500, 130),
+        line("check how much is", 120, 150, 400, 180),
+        line("left on my plan", 120, 190, 380, 220),
+        line("Copy code", 900, 150, 1000, 180),
+    ]
+    assert [t for t, _, _ in without_wrapped_echo(lines, PLAN_GOAL)] == ["Type this into the panel:", "Copy code"]
+
+
+def test_a_goal_split_side_by_side_on_one_row_is_dropped_whole():
+    """Run 20261114-134815: OCR read the goal's one row as two lines, the second starting where the first ended."""
+    lines = [
+        line("check how much is", 773, 841, 1090, 871),
+        line("left on my plan", 1090, 841, 1312, 871),
+        line("Copy code", 1400, 841, 1500, 871),
+    ]
+    assert [t for t, _, _ in without_wrapped_echo(lines, PLAN_GOAL)] == ["Copy code"]
+
+
+def test_a_few_of_the_goals_words_on_a_page_stay():
+    lines = [line("left on my plan", 120, 190, 380, 220), line("Upgrade", 120, 230, 260, 260)]
+    assert without_wrapped_echo(lines, PLAN_GOAL) == lines
+
+
+def test_pieces_of_the_goal_far_apart_are_not_one_wrapped_goal():
+    lines = [line("check how much is", 120, 150, 400, 180), line("left on my plan", 900, 600, 1160, 630)]
+    assert without_wrapped_echo(lines, PLAN_GOAL) == lines
 
 
 def ocr_item(index, text, x1, y1, x2, y2, conf=0.9):
@@ -246,6 +282,24 @@ def test_perceive_says_which_items_are_under_a_popup_by_their_final_index(monkey
     items = perception.perceive(screen, 255, "goal")
     assert [it.text for it in items] == ["Title", "Organise"]  # renumbered in reading order
     assert screen.covered == {1: bubble}
+
+
+def test_text_behind_a_modal_dialog_is_no_item(monkeypatch):
+    """runs/20261115-172219 step 33: a filter dialog over a page of cards. Chromium leaves the page outside an
+    aria-modal dialog out of the tree, so a badge on a card is OCR alone, and a click on it lands on the
+    backdrop and closes the dialog. Text in the dialog, and the browser's own bar above the page, stay."""
+    dialog = AxNode(role=AX_MODAL, label="Filters", x=100, y=60, w=150, h=120, pressable=False, page=(0, 40, 400, 160))
+    inside = control(110, 120, 80, 20, "Free parking")
+    monkeypatch.setattr(desktop, "actionable_elements", lambda pid, w, h: ([inside, dialog], [], False))
+    blocks = [
+        ocr_item(0, "Top rated", 10, 80, 90, 95),
+        ocr_item(1, "Selected", 110, 90, 170, 105),
+        ocr_item(2, "Tab title", 10, 10, 60, 25),
+    ]
+    monkeypatch.setattr(perception, "ocr", lambda *args: blocks)
+    screen = Screen(image=busy_page((400, 200)), scale=1.0, app="Brave Browser", field=None, url=None, pid=7)
+    items = perception.perceive(screen, 255, "goal")
+    assert sorted(it.text for it in items) == ["Free parking", "Selected", "Tab title"]
 
 
 # ----- the focused field's own text ----------------------------------------------------------

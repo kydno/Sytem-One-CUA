@@ -31,6 +31,9 @@ PERMISSIONS = ("full", "ask", "look")
 # How sure the decision model must be that an action changes something (sends, buys, saves, posts,
 # submits) before `ask` or `look` holds it. Not yet calibrated on a probe; unsure holds it.
 CHANGES_NOUL = 0.5
+# How sure the decision model must be that a screen shows what a goal that only looks asks for before the writer
+# reads it. Not yet calibrated; a wrong yes costs one writer call, a wrong no a page passed by.
+SHOWN_NOUL = 0.5
 DEFAULT_STEPS = 100
 DEFAULT_DELAY = 2.0
 DEFAULT_HANDOFFS = 10  # each one is a call to the answer model, a few seconds and a few cents

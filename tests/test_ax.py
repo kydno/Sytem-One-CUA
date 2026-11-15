@@ -4,22 +4,22 @@ import pytest
 from conftest import busy_page
 
 from typesafe_computer_use import perception
-from typesafe_computer_use.ax_walk import AxAttrs, walk_actionable
+from typesafe_computer_use.ax_walk import AX_MODAL, AxAttrs, walk_actionable
 from typesafe_computer_use.models import AxNode, Item
 from typesafe_computer_use.platform_adapter import desktop
 
 DISPLAY = (1728.0, 1117.0)
 
 
-def node(role, label="", frame=(10.0, 10.0, 100.0, 20.0), press=False, children=()):
-    return {"role": role, "label": label, "frame": frame, "press": press, "children": list(children)}
+def node(role, label="", frame=(10.0, 10.0, 100.0, 20.0), press=False, children=(), dialog=False):
+    return {"role": role, "label": label, "frame": frame, "press": press, "children": list(children), "dialog": dialog}
 
 
 def walk(root, **kwargs):
     return walk_actionable(
         root,
         lambda n: n["children"],
-        lambda n: AxAttrs(n["role"], n["label"], n["frame"]),
+        lambda n: AxAttrs(n["role"], n["label"], n["frame"], n.get("dialog", False)),
         lambda n: ["AXPress"] if n["press"] else [],
         *DISPLAY,
         **kwargs,
@@ -380,3 +380,84 @@ def test_a_sleeping_tab_is_named_by_its_title_alone():
         "Settings",
         "Inactive tab",  # a page of that name keeps it
     ]
+
+
+def drift(screen, monkeypatch, *nodes: AxNode) -> tuple[list[Item], dict]:
+    """A link's text read off a capture where the page has since moved: the walk finds the link's frame
+    below, over page the capture shows empty, so it is dropped as not drawn."""
+    monkeypatch.setattr(desktop, "actionable_elements", lambda pid, w, h: (list(nodes), [], False))
+    monkeypatch.setattr(
+        perception, "ocr", lambda screen, budget, goal, *_: [Item(0, "Open report ↗", 0.9, 100.0, 400.0, 300.0, 440.0)]
+    )
+    live = replace(screen, pid=123)
+    return perception.perceive(live, 255, "goal"), live.ax_refs
+
+
+def link(label: str, y: float, x: float = 50.0) -> AxNode:
+    return AxNode(role="AXLink", label=label, x=x, y=y, w=100.0, h=22.0, pressable=True, ref=object())
+
+
+def test_text_whose_link_moved_since_the_capture_is_pressed_through_the_link(screen, monkeypatch):
+    """Run 20261113-202018, step 4: the click on the text, aimed from the capture, landed on the
+    button that had moved into its place."""
+    moved = link("Open report", y=236.0)
+    items, refs = drift(screen, monkeypatch, moved)
+    assert [(it.text, it.source) for it in items] == [("Open report ↗", "ocr")]
+    assert refs == {0: moved.ref}
+
+
+@pytest.mark.parametrize(
+    "nodes",
+    [
+        [link("Open report", y=400.0)],  # too far to be the same line moved
+        [link("Open report", y=236.0, x=600.0)],  # another column
+        [link("Close", y=236.0)],  # another control
+        [link("Open report", y=236.0), link("Open report", y=180.0)],  # two to choose between
+        [link("Open", y=236.0), link("Report", y=236.0, x=0.0)],  # each holds a word, neither the line
+    ],
+)
+def test_text_with_no_single_moved_twin_nearby_keeps_its_pointer_click(screen, monkeypatch, nodes):
+    _, refs = drift(screen, monkeypatch, *nodes)
+    assert refs == {}
+
+
+@pytest.mark.parametrize("text", ["O", "Add"])
+def test_a_stray_letter_or_a_piece_of_a_word_has_no_twin(screen, monkeypatch, text):
+    """The icon beside a link reads as a lone "O", and "Add" is not the "Address" link."""
+    monkeypatch.setattr(desktop, "actionable_elements", lambda pid, w, h: ([link("Address", y=236.0)], [], False))
+    monkeypatch.setattr(perception, "ocr", lambda screen, budget, goal, *_: [Item(0, text, 0.9, 100.0, 400.0, 300.0, 440.0)])
+    live = replace(screen, pid=123)
+    perception.perceive(live, 255, "goal")
+    assert live.ax_refs == {}
+
+
+def browser_page(*children):
+    tab = node("AXButton", label="Shop | Cabins", frame=(10.0, 40.0, 200.0, 20.0), press=True)
+    area = node("AXWebArea", label="Shop", frame=(0.0, 100.0, 1728.0, 1000.0), children=children)
+    return app(node("AXWindow", label="Shop", frame=(0.0, 0.0, 1728.0, 1117.0), children=[tab, area]))
+
+
+def filters_dialog():
+    show = node("AXLink", label="Apply", frame=(800.0, 900.0, 150.0, 30.0), press=True)
+    return node("AXGroup", label="Filters", frame=(450.0, 150.0, 570.0, 800.0), children=[show], dialog=True)
+
+
+def test_a_dialog_with_nothing_of_its_page_outside_it_is_modal():
+    """Chromium prunes a page outside its aria-modal dialog: only the dialog's controls are left, and the
+    browser's own tab, outside the page, does not count against it."""
+    found, _, _ = walk(browser_page(filters_dialog()))
+    modals = [n for n in found if n.role == AX_MODAL]
+    assert [(n.label, n.x, n.page) for n in modals] == [("Filters", 450.0, (0.0, 100.0, 1728.0, 1000.0))]
+
+
+def test_a_dialog_beside_controls_of_its_page_is_not_modal():
+    """A cookie banner is a dialog too, but the page around it is still in the tree and still clickable."""
+    listing = node("AXLink", label="Lake cabin", frame=(50.0, 600.0, 300.0, 100.0), press=True)
+    found, _, _ = walk(browser_page(filters_dialog(), listing))
+    assert all(n.role != AX_MODAL for n in found)
+
+
+def test_a_capped_walk_reports_no_modal():
+    """Controls the cap left unwalked could lie outside the dialog: no sign it is modal."""
+    found, _, capped = walk(browser_page(filters_dialog()), node_cap=4)
+    assert capped and all(n.role != AX_MODAL for n in found)

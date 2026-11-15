@@ -115,6 +115,10 @@ def click_item(item: Item, screen: Screen) -> str:
             return f"pressed {item.text!r} via accessibility"
         unseen = True
     popup = screen.covered.get(item.index)
+    if popup is None and drifted(item, screen):
+        # After a press that went out, this is no refusal that did nothing: the press may be what moved the page.
+        pressed = "accessibility press showed nothing, then " if unseen else ""
+        return f"{pressed}click refused: {item.text!r} was not clicked, the page moved under it since the screen was read"
     closed = f"{close_popup(popup)} then " if popup is not None else ""
     try:
         desktop.click_at(screen.to_points(item))
@@ -179,6 +183,25 @@ def _drag(decision: Decision, screen: Screen, items: list[Item], ctx: Context) -
     except Missed as e:
         return f"drag_item refused: {source.text!r} was not dragged, {e}"
     return f"dragged {source.text!r} onto {target.text!r}"
+
+
+def drifted(item: Item, screen: Screen) -> bool:
+    """Whether a web page no longer shows, where the item was, what the capture showed there.
+
+    A pointer click is aimed from the capture, and a page that is still laying out moves under it: late
+    content pushed a billing page down by a line, and a click aimed at a link landed on the buy button
+    that had moved into its place. So before the pointer goes, the item's own box is looked at again,
+    and a box that changed is not clicked: the next step reads the page as it is. Outside a web page
+    nothing lays itself out late, and nothing is looked at.
+
+    The focused element is left out of the look only when it is a text field, whose caret blinks. A
+    browser often reports the page itself as focused, and leaving that out would leave nothing to see.
+    """
+    if screen.url is None:
+        return False
+    box = (item.x1 / screen.scale, item.y1 / screen.scale, item.x2 / screen.scale, item.y2 / screen.scale)
+    caret = screen.field if screen.field is not None and screen.field.is_text else None
+    return moved(screen.image, desktop.screenshot(), screen.scale, caret, within=box)
 
 
 def press_showed(screen: Screen) -> bool:

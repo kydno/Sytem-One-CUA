@@ -96,6 +96,7 @@ def test_the_answer_request_carries_what_the_run_has_learned_and_offers_both_way
         "achieved",
         "answer",
         "focus",
+        "then",
         "question",
         "wait",
         "scroll",
@@ -105,6 +106,7 @@ def test_the_answer_request_carries_what_the_run_has_learned_and_offers_both_way
     assert packet["current_focus"] == "Open the size menu"
     assert packet["user_said"] == [{"asked": "13 or 15 inch?", "replied": "15"}]
     assert packet["earlier_stops"] == stops and packet["user_can_be_asked"] is True
+    assert "focused_field" in packet  # a focus that types names clicking the field first when it is not this one
 
 
 def test_the_typed_text_and_the_proposed_url_are_composed_under_the_guidance(screen):
