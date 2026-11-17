@@ -39,6 +39,20 @@ POOLS = {
         "car service log.csv",
         "quarterly review.key",
         "passport scan.pdf",
+        "school forms.pdf",
+        "garden notes.md",
+        "volunteer rota.xlsx",
+        "pension statement.pdf",
+        "wedding speech.docx",
+        "bike insurance.pdf",
+        "phone contract.pdf",
+        "family tree.md",
+        "council tax 2026.pdf",
+        "holiday budget.xlsx",
+        "warranty - fridge.pdf",
+        "book club notes.md",
+        "running log.csv",
+        "car loan.pdf",
     ),
     "/Home/Downloads": (
         "invoice-4471.pdf",
@@ -51,6 +65,19 @@ POOLS = {
         "conference schedule.pdf",
         "font pack.zip",
         "warranty card.pdf",
+        "bank export 2026-02.csv",
+        "driver update.zip",
+        "lecture slides week 4.pdf",
+        "concert tickets.pdf",
+        "map of the old town.png",
+        "audiobook sample.mp3",
+        "menu.pdf",
+        "screenshot 0907.png",
+        "receipt-88213.pdf",
+        "sewing pattern.pdf",
+        "wallpaper 4k.jpg",
+        "presentation template.key",
+        "gift card.pdf",
     ),
     "/Home/Documents/Receipts": (
         "hardware store.pdf",
@@ -89,7 +116,7 @@ def stamp(r: random.Random) -> str:
 def content(r: random.Random) -> dict:
     entries = {path: {"kind": "folder", "modified": stamp(r)} for path in FOLDERS}
     for folder, pool in POOLS.items():
-        keep = pool if folder == "/Trash" or len(pool) <= 5 else r.sample(pool, k=r.randint(6, len(pool)))
+        keep = pool if folder == "/Trash" or len(pool) <= 5 else r.sample(pool, k=r.randint(max(6, len(pool) - 6), len(pool)))
         for name in keep:
             entry = {
                 "kind": "file",
@@ -115,6 +142,16 @@ def content(r: random.Random) -> dict:
 
 def name(path: str) -> str:
     return path.rsplit("/", 1)[1]
+
+
+IN_VIEW = 16  # rows a fresh window shows whole, sorted by name, with room to spare
+
+
+def in_view(f: dict, folder: str) -> list[str]:
+    """The files of `folder` that a fresh window shows without scrolling: the list sorts by name, as
+    files.js does, and folders sort among the files."""
+    rows = sorted((p for p in f["entries"] if p.rsplit("/", 1)[0] == folder), key=lambda p: (name(p).lower(), name(p)))
+    return [p for p in rows[:IN_VIEW] if f["entries"][p]["kind"] == "file"]
 
 
 def files_in(f: dict, folder: str) -> list[str]:
@@ -154,7 +191,7 @@ def open_file(seed: int) -> Task:
     title = "files/open"
     r = rng(title, seed)
     f = content(r)
-    path = r.choice(files_in(f, f["cwd"]))
+    path = r.choice(in_view(f, f["cwd"]))
     start = copy.deepcopy(f)
 
     def check(final: dict, answer: str | None) -> bool:
@@ -203,7 +240,7 @@ def rename(seed: int) -> Task:
     title = "files/rename"
     r = rng(title, seed)
     f = content(r)
-    path = r.choice(files_in(f, f["cwd"]))
+    path = r.choice(in_view(f, f["cwd"]))
     stem, dot, ext = name(path).rpartition(".")
     wanted = f"{stem} (old).{ext}" if dot else f"{name(path)} (old)"
     start = copy.deepcopy(f)
@@ -231,7 +268,7 @@ def trash(seed: int) -> Task:
     r = rng(title, seed)
     f = content(r)
     f["cwd"] = "/Home/Downloads"
-    path = r.choice(files_in(f, f["cwd"]))
+    path = r.choice(in_view(f, f["cwd"]))
     start = copy.deepcopy(f)
     to = f"/Trash/{name(path)}"
 
@@ -247,7 +284,7 @@ def trash(seed: int) -> Task:
         oracle=(
             ("click_item", at(path)),
             ("click_item", ("Move to Trash", "button")),
-            ("click_item", ("Move to Trash", "button", "Cancel")),
+            ("click_item", ("Move to Trash", "button", None, "Cancel")),  # the sheet's, after its Cancel
         ),
         tags=("click_item", "dialog"),
     )
@@ -255,14 +292,14 @@ def trash(seed: int) -> Task:
 
 @template("files/move", 3)
 def move_drag(seed: int) -> Task:
-    """Move a file into a folder beside it, by dragging it there."""
+    """Move a file onto a place in the sidebar, by dragging it there."""
     title = "files/move"
     r = rng(title, seed)
     f = content(r)
-    path = r.choice(files_in(f, f["cwd"]))
-    # Not "Taxes 2025": perception joins that row with its date line, which shares the token "2025",
-    # and the row's item reads as the date. A real run meets it; the oracle names rows by their text.
-    folder = r.choice(("/Home/Documents/Receipts", "/Home/Documents/Travel"))
+    f["cwd"] = "/Home/Downloads"
+    path = r.choice(in_view(f, f["cwd"]))
+    # A place in the sidebar, which is always in view, where a folder in a full list may not be.
+    folder = r.choice(("/Home/Desktop", "/Home/Documents"))
     start = copy.deepcopy(f)
     to = f"{folder}/{name(path)}"
 
@@ -272,7 +309,7 @@ def move_drag(seed: int) -> Task:
     return Task(
         id=f"{title}@{seed}",
         tier=3,
-        goal=f"Drag {name(path)} into the {name(folder)} folder.",
+        goal=f"Drag {name(path)} from Downloads onto {name(folder)} in the sidebar.",
         seed=seed_for(r, f),
         check=check,
         oracle=(("drag_item", (at(path), at(folder))),),
@@ -287,7 +324,7 @@ def move_dialog(seed: int) -> Task:
     r = rng(title, seed)
     f = content(r)
     f["cwd"] = "/Home/Downloads"
-    path = r.choice(files_in(f, f["cwd"]))
+    path = r.choice(in_view(f, f["cwd"]))
     folder = r.choice(("/Home/Documents/Receipts", "/Home/Documents/Travel", "/Home/Documents/Taxes 2025"))
     start = copy.deepcopy(f)
     to = f"{folder}/{name(path)}"

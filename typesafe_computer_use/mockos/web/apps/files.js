@@ -216,10 +216,10 @@
         ...(renaming ? {} : Kit.draggable({ from: path })),
         ...(folder ? Kit.dropTarget({ type: "files.move", to: path }) : {}),
       },
-      h("div", { class: "fname" }, h("span", { class: folder ? "ficon folder" : "ficon", "aria-hidden": "true" }, folder ? "▸" : "≡"), label),
-      h("div", { class: "fdate" }, when(entry.modified)),
-      h("div", { class: "fsize" }, folder ? "--" : size(entry.size)),
-      h("div", { class: "fkind" }, searching ? parent(path).replace("/Home", "Home") : kind(f, path)),
+      h("div", { class: "fname", role: "cell" }, h("span", { class: folder ? "ficon folder" : "ficon", "aria-hidden": "true" }, folder ? "▸" : "≡"), label),
+      h("div", { class: "fdate", role: "cell" }, when(entry.modified)),
+      h("div", { class: "fsize", role: "cell" }, folder ? "--" : size(entry.size)),
+      h("div", { class: "fkind", role: "cell" }, searching ? parent(path).replace("/Home", "Home") : kind(f, path)),
     );
   }
 
