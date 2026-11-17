@@ -1607,6 +1607,8 @@ def test_l46_a_user_who_declines_to_answer_ends_the_run(monkeypatch, tmp_path):
     assert world.asked == ["13 or 15 inch?"]
     assert world.log == [] and state.handoffs == []
     assert len(writer.packets) == 1
+    # The answer the run ends on is the one given with the question, not none at all.
+    assert state.answer is not None and json.loads((tmp_path / "run" / "run.json").read_text())["answer"] == state.answer.text
 
 
 def test_l47_the_asking_is_bounded(monkeypatch, tmp_path):
@@ -2825,3 +2827,245 @@ def test_l88_a_click_that_changed_nothing_is_marked_so(monkeypatch, tmp_path):
 
     (ada,) = [it for it in world.fake.states[-1]["screen_items_in_reading_order"] if it["text"] == "Ada"]
     assert ada["clicked_before"] == "changed nothing"
+
+
+BALANCE_GOAL = "how much is left on my account"
+
+
+def account() -> World:
+    """An activity page that shows spending but not what is left, and a billing page that shows the balance
+    beside a link back to the activity, whose name matches the goal's wording better than the balance does."""
+    activity = "https://account.example.com/activity"
+    return World(
+        [
+            Page(name="activity", items=["Activity", "Spent $3", "Billing"], url=activity, on={"click:Billing": "billing"}),
+            Page(
+                name="billing",
+                items=["Billing", "Balance", "$7", "Account activity"],
+                url="https://account.example.com/billing",
+                on={"click:Account activity": "activity"},
+            ),
+        ]
+    )
+
+
+def matches_the_words(state: dict, questions: dict):
+    """Unsure on the activity page, the focus when there is one, and on the billing page the link whose
+    name matches the goal's wording, as the classifier did on the real page."""
+    if state.get("current_focus"):
+        return ("click_item", "Billing")
+    if state["browser_active_tab_url"].endswith("/billing"):
+        return ("click_item", "Account activity")
+    return ("click_item", "Spent $3", 0.1)
+
+
+def test_l89_on_a_goal_that_only_looks_the_writer_reads_where_its_focus_led(monkeypatch, tmp_path):
+    """Run 20261113-202018, step 3: the focus took the run to the page holding the answer, and the
+    classifier, back on the goal's words alone, clicked away from it."""
+    world = account()
+    writer = FakeWriter(reviews=[{"focus": "Open 'Billing' to read the balance"}])
+
+    state = drive(
+        world, matches_the_words, goal=BALANCE_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer, read_only=True
+    )
+
+    assert world.log == ["click:Billing"]
+    assert state.outcome == "focus taken" and state.answer.achieved and "$7" in state.answer.text
+    assert writer.packets[1]["why_the_run_stopped"] == STOPPED["focus taken"]
+    assert len(world.fake.states) == 2  # the classifier was not asked on the billing page
+    summary = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert summary["goal_achieved"] is True and not (tmp_path / "run" / "handoff.json").exists()
+
+
+def test_l89b_a_check_that_finds_the_goal_not_met_hands_the_run_back_to_the_classifier(monkeypatch, tmp_path):
+    world = account()
+    writer = FakeWriter(reviews=[{"focus": "Open 'Billing'"}, {"achieved": False}])
+    policy = scripted(("click_item", "Spent $3", 0.1), ("click_item", "Billing"), ("done", None))
+
+    state = drive(world, policy, goal=BALANCE_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer, read_only=True)
+
+    assert world.log == ["click:Billing"]
+    assert state.outcome == "done" and state.answer.achieved
+    assert len(writer.packets) == 3  # the stop, the check, and the classifier's done
+    reviews = json.loads((tmp_path / "run" / "step-002-review.json").read_text())
+    assert [(r["outcome"], r["achieved"], r["handed_back"]) for r in reviews] == [("focus taken", False, True)]
+    assert [h.outcome for h in state.handoffs] == ["low confidence"]  # the check spent no handoff
+
+
+def filter_panel() -> World:
+    """runs/20261115-172219: a filter panel whose choices are all on the screen the writer read, and the
+    button that applies them. Each choice marks itself selected."""
+    url = "https://shop.example.com/s/cabins"
+    choices = ["Top rated", "2+ rooms", "Apply"]
+    return World(
+        [
+            Page(name="panel", items=["Filters", *choices], url=url, on={"click:Top rated": "picked"}),
+            Page(name="picked", items=["Filters", "Selected: Top rated", *choices], url=url, on={"click:2+ rooms": "both"}),
+            Page(
+                name="both",
+                items=["Filters", "Selected: Top rated, 2+ rooms", *choices],
+                url=url,
+                on={"click:Apply": "results"},
+            ),
+            Page(name="results", items=["Lake cabin", "3 rooms", "Top rated"], url=url + "?filtered"),
+        ]
+    )
+
+
+def follows_the_focus(state: dict, questions: dict):
+    """The quoted item of the focus when there is one; unsure otherwise."""
+    focus = state.get("current_focus")
+    if focus:
+        return ("click_item", focus.split("'")[1])
+    return ("click_item", "Filters", 0.1)
+
+
+def test_l89d_moves_the_writer_queued_on_one_screen_are_made_before_it_reads_again(monkeypatch, tmp_path):
+    """The run above paid a writer call for every click in the panel: each check named only the next one."""
+    world = filter_panel()
+    writer = FakeWriter(reviews=[{"focus": "Click 'Top rated'", "then": ["Click '2+ rooms'", "Click 'Apply'"]}])
+
+    state = drive(
+        world,
+        follows_the_focus,
+        goal="find a top rated cabin with 2+ rooms",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=writer,
+        read_only=True,
+    )
+
+    assert world.log == ["click:Top rated", "click:2+ rooms", "click:Apply"]
+    assert len(writer.packets) == 2  # the stop, and one check after the last queued move
+    assert state.outcome == "focus taken" and state.answer.achieved and "Lake cabin" in state.answer.text
+
+
+def test_l89f_another_move_than_the_focus_drops_the_queue_and_the_writer_reads(monkeypatch, tmp_path):
+    """The classifier pressed Escape in place of the focus, which may close the panel the queue was read from:
+    the rest of the queue is not handed to the screen that follows, and the writer reads it."""
+    world = filter_panel()
+    writer = FakeWriter(reviews=[{"focus": "Click 'Top rated'", "then": ["Click '2+ rooms'", "Click 'Apply'"]}, {}])
+    policy = scripted(("click_item", "Filters", 0.1), ("press_escape", None))
+
+    state = drive(
+        world,
+        policy,
+        goal="find a top rated cabin with 2+ rooms",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=writer,
+        read_only=True,
+    )
+
+    assert "click:2+ rooms" not in world.log and "click:Apply" not in world.log
+    assert state.queued == () and len(writer.packets) == 2
+    assert writer.packets[1]["why_the_run_stopped"] == STOPPED["focus taken"]
+
+
+def test_l89e_a_new_stop_drops_the_moves_still_queued(monkeypatch, tmp_path):
+    """The classifier stops again before the queue is spent, here with a done in place of the focus, and the
+    writer reads the screen afresh: what it queued on the earlier screen is not followed after its new answer."""
+    world = filter_panel()
+    writer = FakeWriter(reviews=[{"focus": "Click 'Top rated'", "then": ["Click '2+ rooms'", "Click 'Apply'"]}, {}])
+    policy = scripted(("click_item", "Top rated"), ("click_item", "Filters", 0.1))
+
+    state = drive(
+        world,
+        policy,
+        goal="find a top rated cabin with 2+ rooms",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=writer,
+        read_only=True,
+    )
+
+    assert world.log == ["click:Top rated"]
+    assert state.queued == () and state.answer.achieved
+
+
+def test_l89c_a_goal_that_changes_something_is_not_checked_after_its_focus(monkeypatch, tmp_path):
+    world = account()
+    writer = FakeWriter(reviews=[{"focus": "Open 'Billing'"}])
+    policy = scripted(("click_item", "Spent $3", 0.3), ("click_item", "Billing"), ("done", None))
+
+    state = drive(world, policy, goal=BALANCE_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer)
+
+    assert state.outcome == "done" and len(writer.packets) == 2 and len(world.fake.states) == 3
+
+
+def test_l90_an_answer_that_sent_the_run_back_is_not_the_answer_of_a_run_stopped_after_it(monkeypatch, tmp_path):
+    """Run 20261113-202018: stopped by the user after the writer had sent it on, the run reported the
+    writer's earlier "not achieved", read from a page it had left, as its answer."""
+    world = account()
+    writer = FakeWriter(reviews=[{"focus": "Open 'Billing'"}])
+
+    def stopped_after_the_focus(state: dict, questions: dict):
+        if state.get("current_focus"):
+            raise KeyboardInterrupt
+        return ("click_item", "Spent $3", 0.1)
+
+    state = drive(world, stopped_after_the_focus, goal=BALANCE_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer)
+
+    assert state.outcome == "aborted (Ctrl-C)" and state.answer is None
+    summary = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert summary["answer"] is None and summary["goal_achieved"] is None
+
+
+def test_l89d_a_check_the_writer_could_not_give_hands_the_run_back_to_the_classifier(monkeypatch, tmp_path):
+    world = account()
+    writer = FakeWriter(reviews=[{"focus": "Open 'Billing'"}, {"achieved": None}])  # the check's reply is unusable
+    policy = scripted(("click_item", "Spent $3", 0.1), ("click_item", "Billing"), ("done", None))
+
+    state = drive(world, policy, goal=BALANCE_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer, read_only=True)
+
+    assert world.log == ["click:Billing"]
+    assert state.outcome == "done" and state.answer.achieved  # the classifier went on, and its done was answered
+
+
+def balance_shown(state: dict) -> float:
+    return 0.9 if state["browser_active_tab_url"].endswith("/billing") else 0.1
+
+
+def test_l91_a_screen_the_classifier_says_shows_the_answer_is_read_before_it_clicks_on(monkeypatch, tmp_path):
+    """Run 20261114-134036, step 3: on the page holding the answer, done got almost nothing and the link
+    whose name matched the goal's wording got the click."""
+    world = account()
+    policy = scripted(("click_item", "Billing"), ("click_item", "Account activity"))
+
+    state = drive(
+        world, policy, goal=BALANCE_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, read_only=True, shown=balance_shown
+    )
+
+    assert world.log == ["click:Billing"]  # not the link away from the balance
+    assert state.outcome == "answer shown" and state.answer.achieved and "$7" in state.answer.text
+    assert "shown" in world.fake.asked[0]
+    summary = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert summary["goal_achieved"] is True and not (tmp_path / "run" / "handoff.json").exists()
+
+
+def test_l91b_a_read_that_finds_no_answer_lets_the_step_go_on_and_the_page_is_not_read_again(monkeypatch, tmp_path):
+    world = account()
+    writer = FakeWriter(reviews=[{"achieved": False}])
+    policy = scripted(("click_item", "Billing"), ("click_item", "Account activity"), ("click_item", "Billing"), ("done", None))
+
+    state = drive(
+        world,
+        policy,
+        goal=BALANCE_GOAL,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=writer,
+        read_only=True,
+        shown=balance_shown,
+    )
+
+    assert world.log == ["click:Billing", "click:Account activity", "click:Billing"]
+    assert len(writer.packets) == 2  # the read on the first visit, and the classifier's done; not the second visit
+    assert writer.packets[0]["why_the_run_stopped"] == STOPPED["answer shown"]
+    assert state.outcome == "done" and state.handoffs == []
+
+
+def test_l91c_a_goal_that_changes_something_is_not_asked_whether_the_answer_shows(monkeypatch, tmp_path):
+    world = account()
+    drive(world, scripted(("click_item", "Billing")), goal=BALANCE_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+    assert all("shown" not in asked for asked in world.fake.asked)

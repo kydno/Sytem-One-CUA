@@ -26,6 +26,7 @@ from .config import (
     MOVES_NOUL,
     PLAN_NOUL,
     READ_ONLY_NOUL,
+    SHOWN_NOUL,
     answer_model,
     moves_override,
     plan_override,
@@ -128,7 +129,18 @@ STOPPED = {
         "what they said is under user_said"
     ),
     "no decision": "the decision model gave no usable answer for this screen: it refused, failed, or was unreachable",
+    "focus taken": (
+        "the classifier did not stop: it took the step your last focus named, and this is the screen that step led to, "
+        "read before it goes on. Answer when the goal is met here; otherwise keep the run going, or leave focus, "
+        "question and scroll empty and wait false, and the classifier goes on toward the goal"
+    ),
+    "answer shown": (
+        "the classifier did not stop: it judged that this screen may show what the goal asks to find out, and the "
+        "screen is read before its next action. Answer when the goal is met here; otherwise keep the run going, or "
+        "leave focus, question and scroll empty and wait false, and the classifier goes on toward the goal"
+    ),
 }
+CHECKS = ("focus taken", "answer shown")  # outcomes of a read the run asked for itself: a not-achieved answer ends nothing
 
 
 def goal_achieved(state) -> bool | None:
@@ -207,6 +219,10 @@ class RunState:
     calls: Calls = field(default_factory=Calls)  # requests to each model, over the whole run
     clicked: Clicked | None = None  # the last action's click on page text, for the screen right after it
     read_only: bool = False  # the goal only asks to find something out, so the lower floor applies
+    check_focus: bool = False  # a focus was just taken on such a goal: the writer reads where it led (see `check_focus`)
+    queued: tuple[str, ...] = ()  # the writer's moves after its focus, each the next focus once one is followed
+    read: set[tuple[str, str | None]] = field(default_factory=set)  # every (app, URL) the writer has read a screen of
+    ended: bool = False  # the writer answered in the middle of a step (see `read_for_answer`), and the run ends on it
     moves: bool = False  # the goal needs a move beyond clicking and typing, so the run is offered the moves that are
     moves_by: str = "gate"  # who settled it: the gate's question about the goal, or CLICKER_MOVES
     plan_by: str = "gate"  # who settled whether the writer was asked for a plan: the gate, or CLICKER_PLAN
@@ -246,8 +262,10 @@ def run(cfg: RunConfig, ctx_factory, events: Events | None = None, *, decisions=
             for step in range(1, cfg.steps + 1):
                 ctx = replace(ctx, guidance=state.guidance)  # a handoff sets the focus, and the action it asked for spends it
                 if run_step(cfg, ctx, state, step, log):
+                    if state.check_focus and not check_focus(cfg, ctx, state, step, log):
+                        break
                     continue
-                if not hand_off(cfg, ctx, state, step, log):
+                if state.ended or not hand_off(cfg, ctx, state, step, log):
                     break
             else:
                 log(f"\nstopped after {cfg.steps} steps")
@@ -483,6 +501,7 @@ def hand_off(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     already drawn over waiting for the rest, so the run waits itself, as a wait the classifier
     chose would, and the classifier reads the screen once it has loaded.
     """
+    state.check_focus = False  # whatever stopped the run, the writer reads the screen now
     stuck(state, log)
     if state.outcome in STOPPED and unfollowed(state):
         log(f"  the focus led to no action: {state.handoffs[-1].focus}")
@@ -504,8 +523,8 @@ def hand_off(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
         except WriterError as e:
             log(f"\nno answer: the writer failed ({e})")
             return False
-        state.answer = answer
         seconds = time.perf_counter() - started
+        state.queued = ()  # moves queued from an earlier screen; only a new focus queues more
         record = {"outcome": state.outcome, "seconds": round(seconds, 3), **asdict(answer), "reply": None, "handed_back": False}
         reviews.append(record)
         try:
@@ -516,7 +535,12 @@ def hand_off(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
                 record["reply"] = reply
                 log(f"  > {reply}", echo=False)  # the terminal already shows what was typed
                 if not reply:
+                    if state.outcome in CHECKS:
+                        log("  no reply; back to the classifier")
+                        record["handed_back"] = True
+                        return True
                     log("  no reply, so the answer stands")
+                    state.answer = answer
                     return False
                 state.guidance = state.guidance.heard(answer.question, reply)
                 if cfg.act and not cfg.replay and state.view is not None:
@@ -551,17 +575,47 @@ def hand_off(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
                 log(
                     f"\nreview ({verdict(answer)}, {seconds:.1f}s):\n  {answer.text}\n  back to the classifier, focus: {answer.focus}"
                 )
+                for move in answer.then:
+                    log(f"  then: {move}")
                 log.event("focus", text=answer.text, focus=answer.focus)
                 record["handed_back"] = True
                 state.handoffs.append(Handoff(step, state.outcome, answer.focus, len(state.history), answer.text))
                 state.guidance = state.guidance.focused(answer.focus)
+                state.queued = answer.then
                 state.idle = state.repeats = state.revisits = 0  # the stall was under the old focus; the new one starts clean
                 return True
+            if state.outcome in CHECKS and not answer.achieved:
+                log(f"\nchecked ({verdict(answer)}, {seconds:.1f}s):\n  {answer.text}\n  back to the classifier")
+                record["handed_back"] = True
+                return True
+            # Only an answer the run ends on is kept: one that sent the run back was written to send it on, and an
+            # abort after it would show the user a verdict on a screen the run had already left.
+            state.answer = answer
             log(f"\nanswer ({verdict(answer)}, {seconds:.1f}s):\n  {answer.text}")
             log.event("answer", text=answer.text, achieved=answer.achieved)
             return False
         finally:
             (cfg.out / f"step-{step:03d}-review.json").write_text(json.dumps(reviews, indent=2), encoding="utf-8")
+
+
+def check_focus(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log) -> bool:
+    """Have the writer read the screen a focus led to, on a goal that only looks: True to go on.
+
+    A focus is one move, and the move is often the way to the answer, not the answer: "open the billing
+    page to check the balance". The classifier cannot read, so once the move is made it is back on the
+    goal's words alone, and on a page holding the balance it clicked the link whose name matched the
+    goal's wording, and on through two more pages, away from the number the user asked for. The writer, which
+    gave the focus, reads the page it led to: the answer ends the run, a new focus or a scroll or a wait
+    keeps it going as any handoff does, and nothing to add hands the run back to the classifier.
+    """
+    state.check_focus = False
+    state.outcome = "focus taken"
+    if hand_off(cfg, ctx, state, step, log):
+        return True
+    if state.answer is not None:
+        return False  # the writer answered, and the run ends on it
+    log("  the check gave no answer; back to the classifier")  # a check is an extra: a failed one ends nothing
+    return True
 
 
 def unfollowed(state: RunState) -> bool:
@@ -636,6 +690,7 @@ def review(cfg: RunConfig, ctx: Context, state: RunState, stopped: str, can_ask:
         state.view = (screen, perceive(screen, MAX_OPTIONS, cfg.goal))
     screen, items = state.view
     state.answered = signature(screen, items)
+    state.read.add((screen.app, screen.url))
     earlier = earlier_screens(state, state.answered)
     earlier_stops = [
         {"after_action": h.actions, "why": STOPPED[h.outcome], "you_said": h.said, "focus_given": h.focus} for h in state.handoffs
@@ -746,6 +801,7 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
                 ctx.browsers,
                 ctx.apps,
                 state.moves,
+                looking=state.read_only and ctx.writer is not None,
             )
     except DecisionError as e:
         # A refusal or an outage is not a guess to act on: the writer reads this screen instead.
@@ -789,7 +845,7 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
         for key, p in top(decision.offscreen, 3):
             log(f"  {p:5.2f}  [{key}] {screen.offscreen[int(key)].label!r}")
 
-    keep_going = resolve(cfg, ctx, state, screen, items, decision, timing, log)
+    keep_going = resolve(cfg, ctx, state, screen, items, decision, timing, log, step)
     timing.setdefault("act", 0.0)
     if state.view is None:  # an action ran: let the screen settle before the next step, or the answer, reads it
         with phase(timing, "settle"):
@@ -851,19 +907,14 @@ def resolve(
     decision: Decision,
     timing: dict[str, float],
     log: Log,
+    step: int = 0,
 ) -> bool:
     """Apply the stop rules, then the action. True to keep looping."""
     if decision.stops:
         log(f"  model says {decision.kind.choice!r}; stopping")
         state.outcome = "done" if decision.kind.choice == "done" else "nothing helps"
         return False
-    # The low floor is for a goal where a wrong click only opens the wrong page. A shortcut is not that: cut, paste
-    # and close tab are not always undone, and a goal that only looks things up is as likely as any to open the moves.
-    floor = (
-        cfg.read_only_confidence
-        if state.read_only and not (decision.pressing_shortcut or decision.pointing)
-        else cfg.min_confidence
-    )
+    floor = confidence_floor(cfg, state, decision)
     if decision.confidence < floor:
         named = named_by_focus(decision, items, state.guidance.focus)
         if named is None or decision.kind.confidence < floor:
@@ -876,6 +927,9 @@ def resolve(
         log.event("would", text=intended(decision, screen, items))
         state.outcome = "dry run"
         return False
+    read = read_for_answer(cfg, ctx, state, screen, decision, step, log)
+    if read is not None:
+        return read
 
     if decision.kind.choice == "type_text":
         # What to write may have been read on another page: a fare found on the way, typed into a document.
@@ -888,14 +942,72 @@ def resolve(
         what = perform(decision, screen, items, ctx)
     state.view = None
     if state.guidance.focus and decision.kind.choice != "wait" and "refused:" not in what:
-        state.guidance = state.guidance.followed()
-        log("  the focus is followed; back to the goal")
+        if state.queued and made_the_move(state.guidance.focus, decision, items):
+            # The writer named this move on the screen it read, so the screen it leads to is read only after the last.
+            state.guidance, state.queued = state.guidance.focused(state.queued[0]), state.queued[1:]
+            log(f"  the focus is followed; next queued focus: {state.guidance.focus}")
+        else:
+            if state.queued:
+                # Another move than the one named, an Escape say, may have closed the panel the queue was read from.
+                log(f"  another move than the focus named; {len(state.queued)} queued dropped")
+                state.queued = ()
+            state.guidance = state.guidance.followed()
+            state.check_focus = state.read_only and ctx.writer is not None
+            log("  the focus is followed; " + ("the writer reads where it led" if state.check_focus else "back to the goal"))
     state.clicked = clicked_field(screen, items, decision, what)
     state.pending_click = click_taken(screen, items, decision, what)
     state.history.append(what)
     log(f"  did: {what}")
     log.event("action", text=what, actions=len(state.history))
     return not repeating(state, what, decision.kind.choice == "wait", log, decision.kind.choice in NAVIGATIONS)
+
+
+def confidence_floor(cfg: RunConfig, state: RunState, decision: Decision) -> float:
+    """The confidence below which the run stops instead of acting.
+
+    The low floor is for a goal where a wrong click only opens the wrong page. A shortcut is not that: cut, paste
+    and close tab are not always undone, and a goal that only looks things up is as likely as any to open the moves.
+    """
+    if state.read_only and not (decision.pressing_shortcut or decision.pointing):
+        return cfg.read_only_confidence
+    return cfg.min_confidence
+
+
+def read_for_answer(
+    cfg: RunConfig, ctx: Context, state: RunState, screen: Screen, decision: Decision, step: int, log: Log
+) -> bool | None:
+    """On a goal that only looks, have the writer read a screen the decision model says shows the answer.
+
+    None to take the step's action as decided. Otherwise the step's action is not taken: False when the
+    writer answered and the run ends on it, True when it sent the run on its own way, as a handoff does.
+
+    The decision model is asked with every step whether the screen shows the answer (see `decide.answer_shown`),
+    since it would not choose done over a click: on the page holding the balance a goal asked for, it clicked a
+    link whose name matched the goal's wording instead. It cannot read what the answer is, so a yes goes to the
+    writer, once for each page: a page the writer has read already, as any handoff reads one, is not read again.
+    Nothing to add, or no answer at all, and the step goes on with its action, since a check is an extra.
+    """
+    if not state.read_only or decision.shown is None or ctx.writer is None:
+        return None
+    log(f"  answer on this screen: {decision.shown:.2f}")
+    page = (screen.app, screen.url)
+    if decision.shown < SHOWN_NOUL or page in state.read:
+        return None
+    log("  the writer reads it before the action")
+    before, handoffs = state.outcome, len(state.handoffs)
+    state.outcome = "answer shown"
+    state.read.add(page)
+    if hand_off(cfg, ctx, state, step, log):
+        if len(state.handoffs) > handoffs:
+            return True  # a focus, a scroll or a wait: the run goes the writer's way, not the step's
+        state.outcome = before
+        return None
+    if state.answer is not None:
+        state.ended = True
+        return False
+    state.outcome = before
+    log("  the check gave no answer; the step goes on")
+    return None
 
 
 def permitted(
@@ -1095,6 +1207,15 @@ def named_by_focus(decision: Decision, items: list[Item], focus: str | None) -> 
     twins = [key for key, it in by_index.items() if key != decision.item.choice and _bare(it.text) == _bare(top.text)]
     rival = max((decision.item.probabilities.get(key, 0.0) for key in twins), default=0.0)
     return top.text if decision.item.confidence >= FOCUS_LEAD * rival else None
+
+
+def made_the_move(focus: str, decision, items: list[Item]) -> bool:
+    """Whether this action clicked the item the focus quotes, so the moves queued after it still hold."""
+    if not decision.clicking:
+        return False
+    top = {str(it.index): it for it in items}.get(decision.item.choice)
+    quotes = {_bare(next(g for g in m.groups() if g)) for m in QUOTED.finditer(focus)}
+    return top is not None and any(quote and quote in _bare(top.text) for quote in quotes)
 
 
 def _bare(text: str) -> str:

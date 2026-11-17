@@ -1140,3 +1140,44 @@ def test_a_back_that_left_the_screen_as_it_was_says_so(screen, back):
     assert log.count(("sleep", actions.PRESS_SECONDS)) == actions.BACK_LOOKS
     look = actions.last_look()
     assert look is not None and not look.changed
+
+
+TEXT = Item(3, "Open report", 0.9, 100.0, 100.0, 300.0, 140.0)
+
+
+def test_text_on_a_web_page_that_moved_under_it_is_not_clicked(page, calls):
+    """Run 20261113-202018, step 4: late content pushed the page down a line between the capture and
+    the click, and the click aimed at a link opened the purchase dialog that had moved into its place."""
+    live, shown = page
+    shown["image"].paste((200, 220, 80), (100, 90, 600, 150))  # a button where the text was
+    what = click_item(TEXT, replace(live, ax_refs={}))
+    assert what == "click refused: 'Open report' was not clicked, the page moved under it since the screen was read"
+    assert runner.REFUSED.match(what) and calls == []
+
+
+def test_text_on_a_web_page_that_held_still_where_it_is_clicked(page, calls):
+    live, shown = page
+    shown["image"].paste((255, 255, 255), (900, 500, 1100, 700))  # something else on the page changed
+    assert click_item(TEXT, replace(live, ax_refs={})) == "clicked 'Open report'"
+    assert calls == [("click", (100.0, 60.0))]
+
+
+def test_a_page_that_has_the_focus_itself_still_shows_it_moved(page, calls):
+    """A browser reports the page as the focused element; left out of the look, it would hide the whole page."""
+    live, shown = page
+    whole_page = Field(role="AXWebArea", label="Billing", placeholder="", value="", x=0, y=0, w=1000, h=600)
+    shown["image"].paste((200, 220, 80), (100, 90, 600, 150))
+    what = click_item(TEXT, replace(live, ax_refs={}, field=whole_page))
+    assert what.startswith("click refused: ") and calls == []
+
+
+def test_a_press_that_showed_nothing_on_a_page_that_moved_is_not_followed_by_a_click(page, calls, monkeypatch):
+    live, shown = page
+    whole_page = Field(role="AXWebArea", label="Billing", placeholder="", value="", x=0, y=0, w=1000, h=600)
+    moved_page = shown["image"].copy()
+    moved_page.paste((200, 220, 80), (100, 90, 600, 150))
+    looks = iter([shown["image"]] * actions.PRESS_LOOKS + [moved_page])
+    monkeypatch.setattr(desktop, "screenshot", lambda: next(looks))
+    what = click_item(REGISTER, replace(live, field=whole_page))
+    assert what.startswith("accessibility press showed nothing, then click refused: ") and calls == []
+    assert not runner.REFUSED.match(what)

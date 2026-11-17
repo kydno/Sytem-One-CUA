@@ -208,6 +208,7 @@ class AxNode:
     pressable: bool
     ref: object | None = field(default=None, compare=False, repr=False)
     covered_by: Popup | None = None
+    page: tuple[float, float, float, float] | None = None  # a modal dialog's page, x, y, w, h: see `ax_walk.AX_MODAL`
 
     @property
     def role_word(self) -> str:

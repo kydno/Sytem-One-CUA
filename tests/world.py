@@ -144,7 +144,7 @@ class World:
         self.apart: list[bool] = []  # whether each step's perception was told to keep a text area's lines apart
         self.asked: list[str] = []  # the questions the writer put to the user
         self.loading = {p.name: p.loads_in for p in pages}
-        self.ticks = 0  # captures taken so far, so a page can show something that moves on its own
+        self.ticks = 0  # captures taken so far, the one showing included, so a page can show something that moves on its own
         self._refs: dict[str, Ref] = {}  # action -> the element, so a ref stays the same object
         self._fields: dict[str, Ref] = {}  # label -> the field's element
 
@@ -211,8 +211,10 @@ class World:
         """What `perception.capture` would return for the page now showing.
 
         Each capture is a tick, so a page whose rows are a callable can move between steps without
-        moving inside one: every other read of the screen in the same step sees the same rows.
+        moving inside one: every other read of the screen in the same step, a screenshot taken before a
+        click among them, sees the same rows the capture drew.
         """
+        self.ticks += 1
         nodes = [
             AxNode(role="AXLink", label=lbl, x=0.0, y=OFFSCREEN_Y, w=120.0, h=32.0, pressable=True, ref=self._ref(f"press:{lbl}"))
             for lbl in self.page.offscreen
@@ -227,7 +229,6 @@ class World:
             window=None,
             offscreen=nodes,
         )
-        self.ticks += 1
         return screen
 
     def drawn(self) -> Image.Image:
@@ -450,6 +451,7 @@ def drive(
     plan: bool = False,
     permissions: str = "full",
     changes: Callable[[dict], float] | None = None,
+    shown: Callable[[dict], float] | None = None,
 ) -> RunState:
     """Run the real loop against the world until it stops itself. `world.fake` holds the classifier.
 
@@ -458,7 +460,7 @@ def drive(
     With `events`, the run reports there, as `clicker --events` does, and the replies come from it.
     """
     world.install(monkeypatch)
-    fake = FakeTypeSafe(policy, noul, read_only, moves, shortcuts, plan, changes)
+    fake = FakeTypeSafe(policy, noul, read_only, moves, shortcuts, plan, changes, shown)
     world.fake = fake
     monkeypatch.setattr(runner, "DecisionClient", lambda: fake)
     cfg = RunConfig(goal=goal, out=tmp_path / "run", act=act, steps=steps, delay=0, permissions=permissions)

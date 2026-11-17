@@ -20,7 +20,7 @@ import Quartz
 from ocrmac import ocrmac
 from PIL import Image
 
-from .ax_walk import AX_PRESS, AxAttrs, Frame, walk_actionable
+from .ax_walk import AX_PRESS, DIALOG_SUBROLES, AxAttrs, Frame, walk_actionable
 from .config import ABORT_CORNER_PX
 from .models import TEXT_ROLES, Abort, AxNode, Field, KeyboardFocus
 
@@ -611,7 +611,11 @@ def _ax_frame(element) -> Frame | None:
 
 
 def _ax_attrs(element) -> AxAttrs:
-    return AxAttrs(str(_ax_attr(element, AS.kAXRoleAttribute) or ""), _ax_label(element), _ax_frame(element))
+    role, label = str(_ax_attr(element, AS.kAXRoleAttribute) or ""), _ax_label(element)
+    # Chromium draws an ARIA dialog as a group with a dialog subrole. Only a labelled group is asked: a page has
+    # hundreds of nameless layout groups, and a dialog has its name, ARIA requires one.
+    dialog = role == "AXGroup" and bool(label) and str(_ax_attr(element, "AXSubrole") or "") in DIALOG_SUBROLES
+    return AxAttrs(role, label, _ax_frame(element), dialog)
 
 
 def _ax_actions(element) -> list[str]:

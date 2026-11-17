@@ -47,8 +47,10 @@ class FakeTypeSafe:
         shortcuts: Callable[[dict], str] | None = None,
         plan: bool = False,
         changes: Callable[[dict], float] | None = None,
+        shown: Callable[[dict], float] | None = None,
     ):
         self.policy = policy
+        self.shown = shown  # how the answer-shown question is answered, from the step's state; never yes without one
         self.changes = changes  # how the changes-something question is answered, from its state; nothing changes without one
         self.change_states: list[dict] = []  # the state each changes-something question was sent
         self.plan = plan  # how the goal-needs-a-plan question is answered: closed unless a scenario opens it
@@ -81,7 +83,7 @@ class FakeTypeSafe:
         if "changes" in questions:
             self.change_states.append(state)
             return SimpleNamespace(answers={"changes": SimpleNamespace(noul=self.changes(state) if self.changes else 0.0)})
-        if any(isinstance(q, Noul) for q in questions.values()):
+        if "kind" not in questions and any(isinstance(q, Noul) for q in questions.values()):
             return SimpleNamespace(answers={name: SimpleNamespace(noul=self.noul) for name in questions})
         if set(questions) == {"target"}:  # the follow-up to a drag_item: where it is dropped, named by text
             self.asked.append(questions)
@@ -123,6 +125,8 @@ class FakeTypeSafe:
         if "offscreen" in questions:
             key = self._offscreen_key(state, target) if kind == "press_offscreen" else "0"
             answers["offscreen"] = _answer(key, confidence)
+        if "shown" in questions:
+            answers["shown"] = SimpleNamespace(noul=self.shown(state) if self.shown else 0.0)
         return answers
 
     @staticmethod
@@ -209,7 +213,7 @@ class FakeWriter:
             reply = {"ok": bool(self.plan), "plan": self.plan}
         elif asked == {"ok", "url", "reason"}:
             reply = {"ok": bool(self.url), "url": self.url, "reason": "the goal names the site"}
-        elif asked == {"achieved", "answer", "focus", "question", "wait", "scroll", "scroll_over"}:
+        elif asked == {"achieved", "answer", "focus", "then", "question", "wait", "scroll", "scroll_over"}:
             self.packets.append(packet)
             earlier = [text for screen in packet.get("earlier_screens", []) for text in screen["text"]]
             scripted = self.reviews.pop(0) if self.reviews else {}
@@ -218,6 +222,7 @@ class FakeWriter:
                 "achieved": not scripted,
                 "answer": " ".join(packet["screen_text_in_reading_order"] + earlier),
                 "focus": "",
+                "then": [],
                 "question": "",
                 "wait": False,
                 "scroll": "",
