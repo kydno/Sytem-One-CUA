@@ -90,7 +90,8 @@ GUARDED_KINDS = frozenset(
         "press_enter",
     }
 )
-YES = frozenset({"y", "yes", "yeah", "yep", "ok", "okay", "sure", "go", "go ahead", "allow", "do it"})
+# "go" is a yes only as the whole reply or as "go ahead": "go back" and "go to the reviews instead" are not.
+YES = frozenset({"y", "yes", "yeah", "yep", "ok", "okay", "sure", "go ahead", "allow", "do it"})
 # What the writer is told the run may do, for the permissions other than `full`.
 MAY_DO = {
     "ask": (
@@ -230,10 +231,12 @@ class RunState:
     held: list[dict] = field(default_factory=list)  # each action the permissions held, and what came of it
 
 
-def run(cfg: RunConfig, ctx_factory, events: Events | None = None) -> RunState:
+def run(cfg: RunConfig, ctx_factory, events: Events | None = None, *, decisions=None) -> RunState:
     """Drive the loop. ctx_factory(typesafe, history) builds the action Context.
 
     With `events`, the run reports to a front end as it goes instead of printing (see events.py).
+    `decisions` builds the decision client, a context manager; by default `DecisionClient`, looked up
+    when the run starts. A cached, budgeted, or scripted client comes in here, as the mock OS's do.
     """
     cfg.out.mkdir(parents=True, exist_ok=True)
     log = Log(cfg.out / "run.log", events)
@@ -246,7 +249,7 @@ def run(cfg: RunConfig, ctx_factory, events: Events | None = None) -> RunState:
     started = time.time()
     models: dict[str, str | None] = {}
     try:
-        with DecisionClient() as typesafe:
+        with (decisions or DecisionClient)() as typesafe:
             ctx = metered(ctx_factory(typesafe, state.history), state.calls)
             models = configured_models(typesafe, ctx)
             log(f"models: decisions {models['decisions']}, writer {models['writer']}, answer {models['answer']}")
@@ -1100,8 +1103,10 @@ class HeldAction:
         into = field_name(screen.field) if screen.field is not None else "the focused field"
         text = fill.text if fill is not None and fill.text else None
         if kind == "type_text":
-            what = f"type {text!r} into {into}" if text else f"type into {into}"
-            held = ("type", what, f"Type into {into}")
+            # Return follows the words when the writer says to submit them, which sends a message: say so.
+            then = " and press Return" if text and fill.submit else ""
+            what = (f"type {text!r} into {into}" if text else f"type into {into}") + then
+            held = ("type", what, f"Type into {into}{then}")
         elif kind == "type_email":
             held = ("type", f"type your email into {into}", f"Type your email into {into}")
         elif kind == "press_enter":
@@ -1135,7 +1140,7 @@ def place(screen: Screen) -> str:
 def said_yes(reply: str) -> bool:
     """A yes as people type it: "yes", "Yes please", "ok, go ahead", "go ahead". Anything else is a no."""
     words = re.sub(r"[^\w\s]", " ", reply.lower()).split()
-    return bool(words) and (words[0] in YES or " ".join(words[:2]) in YES)
+    return bool(words) and (words[0] in YES or " ".join(words[:2]) in YES or words == ["go"])
 
 
 def click_key(app: str, url: str | None, text: str) -> tuple:

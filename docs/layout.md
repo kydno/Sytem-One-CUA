@@ -24,7 +24,8 @@ typesafe_computer_use/
   calls.py        requests counted per model, at the two clients
   report.py       logging, annotated screenshots, payload dump
   timing.py       phase stopwatches, the timing line, run summary
-  cli.py          `clicker` and `clicker-inspect`
+  takeover.py     `clicker-takeover`: an LLM on OpenRouter drives on from a run's `handoff.json`
+  cli.py          `clicker`, `clicker-inspect`, and `clicker-takeover`
   events.py       `clicker --events`: the run as JSON lines, replies on stdin
   osworld/        the agent in OSWorld (see [OSWorld](osworld.md))
     agent.py      `JevAgent`: OSWorld's reset() and predict(), the step loop on a worker thread
@@ -41,6 +42,17 @@ typesafe_computer_use/
     size.py       request bytes by part, against a baseline
     report.py     the aggregate rows a pass leaves in `benchmarks/replay/`
     cli.py        `clicker-eval`
+  mockos/         `clicker-mock`: a fake desktop in Chromium for reactive evals (see [mock OS](mock-os.md))
+    web/          the page: os.js (state, dispatch, scheduler, snapshot), kit.js (controls), apps/
+    page.py       Chromium started, sized, and loaded with a task
+    desktop.py    `MockDesktop`: the Desktop surface over the page, one snapshot per screenshot
+    tasks/        templates: a goal, a starting state, a check, and the oracle that solves it
+    passes.py     the oracle check, and passes with cached, budgeted replies, into rows
+    compare.py    a pass's rows, and what changed between two
+    replay.py     replay.html for a run folder, index.html for a pass
+    profile.py    what the loop saw of each app, in numbers
+    cli.py        `clicker-mock`
+  stand_ins.py    stand-ins for both models, driven by a script: the tests' and the mock's oracles
   browser/        the browser backend (see [browser backend](browser-backend.md)), opt-in and independent of macos.py
     cdp.py        the only module that touches the browser        (platform adapter)
     perceive.py   DOM collection: ordered elements, click points, occlusion

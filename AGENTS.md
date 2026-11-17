@@ -24,8 +24,8 @@ maintainer's own Mac, often while they are using it.
 The rule is about this machine's screen, input, and apps, not about running commands. Ask first,
 every time, before anything that would use or take them over:
 
-- running the project on this machine: `clicker`, `clicker-inspect`, or any script that imports
-  the platform adapter and calls it
+- running the project on this machine: `clicker`, `clicker-inspect`, `clicker-takeover`, or any
+  script that imports the platform adapter and calls it
 - starting the menu bar app: `menubar/Scripts/run.sh`, `menubar/Scripts/install-login-item.sh`,
   or opening `SystemOne.app`, since its runs drive this machine
 - anything that moves the mouse, presses keys, clicks, scrolls, or types
@@ -53,6 +53,18 @@ resources, or spend money, still get a yes first.
 `scripts/osworld results` reads result files. Neither needs approval. `scripts/osworld run-jev`,
 `run-luna`, and anything else that starts an OSWorld VM, here or in the cloud, need approval for
 each command.
+
+## Mock OS
+
+`clicker-mock` ([docs/mock-os.md](docs/mock-os.md)) runs the agent on a fake desktop in a Chromium
+it starts itself. The rules above apply unchanged:
+
+- On this machine, `clicker-mock check`, `run` and `open` launch a browser, headless or headed, so
+  each needs a yes first. In `scripts/sandbox` or in a cloud session they do not.
+- `run` asks the real models for what its cache lacks, so it runs only inside an open batch, as
+  `clicker-eval decisions` does. `check`, `run --cached-only`, `list`, `compare`, `show`, `replay`
+  and `profile runs` ask no model.
+- Mock tasks are written from scratch. Nothing from `runs/` or `.private/` goes into one.
 
 ## Tests stay off the machine
 
