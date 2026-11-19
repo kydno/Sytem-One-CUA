@@ -11,7 +11,8 @@
 # committed or not:
 #
 #   menubar     menubar/                                swift build, bash -n on its scripts
-#   infra       infra/gcp/, scripts/osworld-gcp         terraform fmt, validate, test; shellcheck; a dry run
+#   infra       infra/gcp/, scripts/osworld-gcp         terraform fmt, validate, test; shellcheck (with
+#                                                       this script); a dry run
 #   mock        typesafe_computer_use/, pyproject.toml,  clicker-mock check: every oracle, no model
 #               uv.lock, sandbox/, compose.yaml
 #   linux       the same as mock                        the tests again on Linux, in the sandbox
@@ -21,7 +22,7 @@
 # session or the sandbox itself) it runs directly. A check whose tool is missing is "not run", with
 # why: never a pass. Exit 1 when a check that ran failed, 0 otherwise.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 2
 REPO=$(pwd)
 
 base=origin/main
@@ -32,7 +33,7 @@ while [[ $# -gt 0 ]]; do
     --all) all=1 ;;
     --base) base=${2:?--base needs a ref}; shift ;;
     --mock-here) mock_here=1 ;;
-    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
     *) echo "scripts/ci: unknown argument $1" >&2; exit 2 ;;
   esac
   shift
@@ -66,6 +67,11 @@ check() {
 not_run() { printf '== %s: not run, %s\n' "$1" "$2"; record "$1" "not run" "$2"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# syntax FILE...: bash -n on each, so a script that cannot even parse fails the gate.
+# It runs through check "$@", which shellcheck cannot follow.
+# shellcheck disable=SC2317
+syntax() { local s; for s in "$@"; do bash -n "$s" || return 1; done; }
 
 # --- scopes ------------------------------------------------------------------------------------
 
@@ -138,7 +144,7 @@ if [[ $menubar == 1 ]]; then
   else
     not_run "menubar build" "needs swift on macOS 26"
   fi
-  check "menubar scripts" bash -c 'for s in menubar/Scripts/*.sh; do bash -n "$s" || exit 1; done'
+  check "menubar scripts" syntax menubar/Scripts/*.sh
 fi
 
 if [[ $infra == 1 ]]; then
@@ -150,9 +156,9 @@ if [[ $infra == 1 ]]; then
   else
     not_run "terraform" "terraform is not installed"
   fi
-  check "infra bash -n" bash -c 'bash -n scripts/osworld-gcp && bash -n infra/gcp/startup.sh'
+  check "infra bash -n" syntax scripts/osworld-gcp infra/gcp/startup.sh
   if have shellcheck; then
-    check "shellcheck" shellcheck scripts/osworld-gcp infra/gcp/startup.sh
+    check "shellcheck" shellcheck scripts/ci scripts/osworld-gcp infra/gcp/startup.sh
   else
     not_run "shellcheck" "shellcheck is not installed"
   fi
