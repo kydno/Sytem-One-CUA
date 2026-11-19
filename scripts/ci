@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# The merge gate, run on this checkout. The repository has no hosted CI, so a pull request is ready
+# only when this has run on its branch tip and its table is in the pull request body.
+#
+#   scripts/ci               the checks this branch's changes need, against origin/main
+#   scripts/ci --all         every check
+#   scripts/ci --base REF    compare against REF instead of origin/main
+#   scripts/ci --mock-here   on a Mac, run `clicker-mock check` here: it launches Chromium, so ask first
+#
+# Python (ruff and the tests) always runs. The rest turn on by what changed since the merge base,
+# committed or not:
+#
+#   menubar     menubar/                                swift build, bash -n on its scripts
+#   infra       infra/gcp/, scripts/osworld-gcp         terraform fmt, validate, test; shellcheck; a dry run
+#   mock        typesafe_computer_use/, pyproject.toml,  clicker-mock check: every oracle, no model
+#               uv.lock, sandbox/, compose.yaml
+#   linux       the same as mock                        the tests again on Linux, in the sandbox
+#
+# A change to this script, or a git error, turns every scope on. On a Mac the mock check runs in
+# scripts/sandbox, never on this machine's screen, unless --mock-here says so. On Linux (a cloud
+# session or the sandbox itself) it runs directly. A check whose tool is missing is "not run", with
+# why: never a pass. Exit 1 when a check that ran failed, 0 otherwise.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+REPO=$(pwd)
+
+base=origin/main
+all=0
+mock_here=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all) all=1 ;;
+    --base) base=${2:?--base needs a ref}; shift ;;
+    --mock-here) mock_here=1 ;;
+    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "scripts/ci: unknown argument $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+logs=$(mktemp -d "${TMPDIR:-/tmp}/scripts-ci.XXXXXX")
+names=()
+states=()
+details=()
+failed=0
+
+record() { names+=("$1"); states+=("$2"); details+=("$3"); }
+
+# check NAME COMMAND...: run it, keep its output, and record the last line of output as the detail.
+check() {
+  local name=$1; shift
+  local log="$logs/${#names[@]}.log"
+  printf '== %s: %s\n' "$name" "$*"
+  local status=0
+  "$@" >"$log" 2>&1 || status=$?
+  if [[ $status == 0 ]]; then
+    record "$name" passed "$(grep -v '^[[:space:]]*$' "$log" | tail -n 1 | cut -c1-100)"
+  else
+    echo "-- $name failed; the end of its output:"
+    tail -n 40 "$log"
+    record "$name" FAILED "exit $status, full log in $log"
+    failed=1
+  fi
+}
+
+not_run() { printf '== %s: not run, %s\n' "$1" "$2"; record "$1" "not run" "$2"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# --- scopes ------------------------------------------------------------------------------------
+
+menubar=0; infra=0; mock=0
+if [[ $all == 1 ]]; then
+  menubar=1; infra=1; mock=1
+  scope_note="every scope (--all)"
+elif ! merge_base=$(git merge-base "$base" HEAD 2>/dev/null); then
+  menubar=1; infra=1; mock=1
+  scope_note="every scope (no merge base with $base)"
+else
+  changed=$( { git diff --name-only "$merge_base" && git ls-files --others --exclude-standard; } 2>/dev/null) \
+    || { changed="scripts/ci"; }
+  while IFS= read -r path; do
+    case "$path" in
+      scripts/ci) menubar=1; infra=1; mock=1 ;;
+      menubar/*) menubar=1 ;;
+      infra/gcp/*|scripts/osworld-gcp) infra=1 ;;
+      typesafe_computer_use/*|pyproject.toml|uv.lock|sandbox/*|compose.yaml) mock=1 ;;
+    esac
+  done <<<"$changed"
+  scope_note="changes since $(git rev-parse --short "$merge_base") ($base)"
+fi
+on=python
+[[ $menubar == 1 ]] && on="$on menubar"
+[[ $infra == 1 ]] && on="$on infra"
+[[ $mock == 1 ]] && on="$on mock linux"
+echo "scripts/ci at $(git rev-parse --short HEAD)$(git diff --quiet HEAD 2>/dev/null || echo ' plus uncommitted changes')"
+echo "scopes from $scope_note: $on"
+echo
+
+# --- the sandbox, for the checks that need Linux or a browser off this machine's screen ---------
+
+# The sandbox is one container for every checkout, so it may be serving another one's files.
+sandbox_problem=""
+sandbox_ready() {
+  have docker || { sandbox_problem="Docker is not installed"; return 1; }
+  docker info >/dev/null 2>&1 || { sandbox_problem="the Docker daemon is not running"; return 1; }
+  local id source
+  id=$(docker compose ps --quiet sandbox 2>/dev/null)
+  if [[ -z $id ]]; then
+    echo "== starting the sandbox"
+    scripts/sandbox up >"$logs/sandbox-up.log" 2>&1 || { sandbox_problem="scripts/sandbox up failed, log in $logs/sandbox-up.log"; return 1; }
+    id=$(docker compose ps --quiet sandbox 2>/dev/null)
+  fi
+  source=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}' "$id" 2>/dev/null)
+  if [[ $source != "$REPO" ]]; then
+    sandbox_problem="the sandbox is serving another checkout ($source)"
+    return 1
+  fi
+  docker compose exec --user agent sandbox uv sync --frozen --quiet >"$logs/sandbox-sync.log" 2>&1 \
+    || { sandbox_problem="uv sync in the sandbox failed, log in $logs/sandbox-sync.log"; return 1; }
+}
+
+# --- checks ------------------------------------------------------------------------------------
+
+if have uv; then
+  check "uv sync" uv sync --frozen --quiet
+  check "ruff check" uv run --frozen ruff check .
+  check "ruff format" uv run --frozen ruff format --check .
+  check "pytest" uv run --frozen pytest -q
+else
+  not_run "python" "uv is not installed"
+fi
+
+if [[ $menubar == 1 ]]; then
+  if [[ $(uname -s) == Darwin ]] && have swift; then
+    # Only the compile: build.sh would create a signing identity in the login keychain.
+    check "menubar build" swift build --package-path menubar
+  else
+    not_run "menubar build" "needs swift on macOS 26"
+  fi
+  check "menubar scripts" bash -c 'for s in menubar/Scripts/*.sh; do bash -n "$s" || exit 1; done'
+fi
+
+if [[ $infra == 1 ]]; then
+  if have terraform; then
+    check "terraform fmt" terraform fmt -check -recursive infra/gcp
+    check "terraform init" terraform -chdir=infra/gcp init -backend=false -input=false
+    check "terraform validate" terraform -chdir=infra/gcp validate
+    check "terraform test" terraform -chdir=infra/gcp test
+  else
+    not_run "terraform" "terraform is not installed"
+  fi
+  check "infra bash -n" bash -c 'bash -n scripts/osworld-gcp && bash -n infra/gcp/startup.sh'
+  if have shellcheck; then
+    check "shellcheck" shellcheck scripts/osworld-gcp infra/gcp/startup.sh
+  else
+    not_run "shellcheck" "shellcheck is not installed"
+  fi
+  # Prints the commands it would run and runs none: nothing reaches a cloud.
+  check "osworld-gcp dry run" scripts/osworld-gcp --dry-run status
+fi
+
+if [[ $mock == 1 ]]; then
+  if [[ $(uname -s) == Linux ]]; then
+    if have uv && { have chromium || have google-chrome; }; then
+      check "mock check" uv run --frozen clicker-mock check
+    else
+      not_run "mock check" "needs uv and Chromium on PATH"
+    fi
+    not_run "linux pytest" "this is Linux: pytest above covers it"
+  elif [[ $mock_here == 1 ]]; then
+    check "mock check (this Mac)" uv run --frozen clicker-mock check
+    if sandbox_ready; then
+      check "linux pytest" docker compose exec --user agent sandbox uv run --frozen pytest -q
+    else
+      not_run "linux pytest" "$sandbox_problem"
+    fi
+  elif sandbox_ready; then
+    check "mock check" docker compose exec --user agent sandbox uv run --frozen clicker-mock check
+    check "linux pytest" docker compose exec --user agent sandbox uv run --frozen pytest -q
+  else
+    not_run "mock check" "$sandbox_problem; on this Mac only with --mock-here, after a yes"
+    not_run "linux pytest" "$sandbox_problem"
+  fi
+fi
+
+# --- the table for the pull request body -------------------------------------------------------
+
+echo
+echo "| Check | Result @ $(git rev-parse --short HEAD) | Detail |"
+echo "|---|---|---|"
+for i in "${!names[@]}"; do
+  printf '| %s | %s | %s |\n' "${names[$i]}" "${states[$i]}" "${details[$i]//|/\\|}"
+done
+exit "$failed"

@@ -33,14 +33,28 @@ a harness one. Every stop rule in the loop was found or fixed that way.
 
 ```
 uv run ruff check . && uv run ruff format .
-uv run pytest -q
+scripts/ci
 ```
 
-There is no CI, so run these yourself. The tests are pure logic, and `tests/conftest.py` stands in
-for the platform modules where they cannot be installed, so they also run on Linux. A change to
-`infra/gcp` or `scripts/osworld-gcp` should pass `terraform fmt -check`, `terraform validate`,
-`terraform test` and `shellcheck` locally. A change to the menu bar app in `menubar/` should pass
-`swift build` and also needs a run by hand.
+There is no hosted CI. The merge gate is `scripts/ci`, run on the branch tip. Ruff and the tests
+always run. The other checks turn on by what the branch changed since `origin/main`:
+
+| Scope | On when the branch changes | Runs |
+|---|---|---|
+| menubar | `menubar/` | `swift build`, and `bash -n` on its scripts. A change there also needs a run by hand |
+| infra | `infra/gcp/`, `scripts/osworld-gcp` | `terraform fmt -check`, `validate` and `test` against mock providers, `shellcheck`, a `--dry-run status` |
+| mock, linux | `typesafe_computer_use/`, `pyproject.toml`, `uv.lock`, `sandbox/`, `compose.yaml` | `clicker-mock check` (every oracle, no model) and the tests again on Linux, both in `scripts/sandbox` |
+
+`scripts/ci --all` turns every scope on, and so does a change to the script itself. It ends with a
+table: each check, whether it passed, failed or was not run, and the commit. Put that table in the
+pull request body. A check whose tool is missing (Docker, terraform, shellcheck) is "not run", with
+the reason, and the pull request says so: it is never a pass. A push after the run needs the
+checks again. The tests are pure logic, and `tests/conftest.py` stands in for the platform modules
+where they cannot be installed, which is why they also run on Linux.
+
+On a Mac the mock check runs in the sandbox, never on the screen you are using. In a cloud session
+or the sandbox itself, which are Linux, it runs directly. `scripts/ci --mock-here` runs it on the
+Mac, which launches a Chromium there, so an agent asks first ([AGENTS.md](AGENTS.md)).
 
 Add a replay-based note to the PR when a change alters what the model sees:
 which run folder, which step, what the decision was before and after. `clicker-eval size` gives the
