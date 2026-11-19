@@ -6,6 +6,7 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
+import httpx
 import pytest
 
 from typesafe_computer_use import macos, windows
@@ -85,6 +86,25 @@ def test_the_windows_pointer_reads_as_mid_screen_too():
 def test_no_browser_process_or_network_is_reachable(touch, tmp_path):
     with pytest.raises(RuntimeError, match="real machine"):
         touch(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "touch",
+    [
+        lambda: urllib.request.urlopen("https://example.com", timeout=1),
+        lambda: httpx.get("https://example.com", timeout=1),
+    ],
+)
+def test_a_proxy_on_loopback_does_not_carry_a_request_out(touch, monkeypatch):
+    # A proxy that listens here would pass the loopback check and forward the request anywhere.
+    with socket.socket() as proxy:
+        proxy.bind(("127.0.0.1", 0))
+        proxy.listen(1)
+        host, port = proxy.getsockname()
+        for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
+            monkeypatch.setenv(name, f"http://{host}:{port}")
+        with pytest.raises(RuntimeError, match="real machine"):
+            touch()
 
 
 def test_a_server_the_test_started_on_loopback_is_still_reachable():

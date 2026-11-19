@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import types
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,6 +67,7 @@ for _windows_module in ("psutil", "uiautomation", "win32api", "win32con", "win32
     if _absent(_windows_module):
         _stub(_windows_module)
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
 
@@ -152,6 +154,15 @@ def _loopback_only(monkeypatch, refuse) -> None:
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+    # A proxy on this machine's loopback address would carry a request out to the network past
+    # the checks above: a cloud session has one in HTTPS_PROXY, and a Mac can set one system-wide.
+    # Every client goes direct instead, so a request for a remote host meets the refusal.
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(urllib.request, "getproxies", dict)
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    monkeypatch.setattr(httpx._utils, "getproxies", dict)
 
 
 @pytest.fixture
