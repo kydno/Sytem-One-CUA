@@ -11,6 +11,8 @@ import anthropic
 import httpx
 import openai
 import pytest
+import websocket
+from conftest import _loopback_only
 
 from typesafe_computer_use import macos, windows
 from typesafe_computer_use.browser import cdp
@@ -92,9 +94,16 @@ def test_no_browser_process_or_network_is_reachable(touch, tmp_path):
 
 
 def _refused_by_the_guard(exc: BaseException | None) -> bool:
-    """An SDK wraps the guard's refusal in its own connection error, so look down the chain."""
-    while exc is not None:
-        if isinstance(exc, RuntimeError) and "real machine" in str(exc):
+    """Whether the guard refused a lookup or a connection. An SDK wraps that refusal in its own
+    connection error, so look down the chain."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if (
+            isinstance(exc, RuntimeError)
+            and "real machine" in str(exc)
+            and ("a lookup of" in str(exc) or "a connection to" in str(exc))
+        ):
             return True
         exc = exc.__cause__ or exc.__context__
     return False
@@ -121,12 +130,43 @@ def test_a_proxy_on_loopback_does_not_carry_a_request_out(touch, monkeypatch):
         host, port = proxy.getsockname()
         for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
             monkeypatch.setenv(name, f"http://{host}:{port}")
+        # A host listed here would skip the proxy and meet the refusal anyway, proving nothing.
+        for name in ("NO_PROXY", "no_proxy"):
+            monkeypatch.delenv(name, raising=False)
         try:
             touch()
         except Exception as exc:
             assert _refused_by_the_guard(exc), f"{exc!r} is not the guard's refusal"
         else:
             pytest.fail("the request went through")
+
+
+def test_the_guard_drops_the_proxy_variables_a_client_reads_itself(monkeypatch):
+    # websocket-client reads https_proxy from the environment on each connect, not through
+    # getproxies, so only unsetting the variables keeps it off a proxy. The guard ran before this
+    # test could set them, so its proxy step runs again here, after they are set.
+    def refuse(what: str):
+        def call(*args, **kwargs):
+            raise RuntimeError(f"a test reached the real machine through {what}")
+
+        return call
+
+    with socket.socket() as proxy:
+        proxy.bind(("127.0.0.1", 0))
+        proxy.listen(1)
+        host, port = proxy.getsockname()
+        for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
+            monkeypatch.setenv(name, f"http://{host}:{port}")
+        for name in ("NO_PROXY", "no_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        _loopback_only(monkeypatch, refuse)
+        assert not [name for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY") if name in os.environ]
+        try:
+            websocket.WebSocket().connect("wss://example.com", timeout=1)
+        except Exception as exc:
+            assert _refused_by_the_guard(exc), f"{exc!r} is not the guard's refusal"
+        else:
+            pytest.fail("the connection went through")
 
 
 def test_a_server_the_test_started_on_loopback_is_still_reachable():
