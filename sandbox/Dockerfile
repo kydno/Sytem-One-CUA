@@ -33,6 +33,8 @@ ENV DISPLAY=:99 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
     UV_PYTHON=python3.12
+# scripts/ci reads this: a browser may start in here without asking (AGENTS.md).
+ENV SYSTEM_ONE_SANDBOX=1
 
 WORKDIR /work
 CMD ["supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]

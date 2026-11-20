@@ -30,7 +30,7 @@ takes its default seeds, and an app alone (`settings`) takes all of its template
 `check`, `run` and `open` start a Chromium on a throwaway profile. **On the maintainer's Mac that
 needs their yes for each command**, headless or headed, as any browser does ([AGENTS.md](../AGENTS.md)).
 In `scripts/sandbox` or in a cloud session it does not. `scripts/ci`, the merge gate, runs `check`
-whenever a branch changes the package: in the sandbox on a Mac, directly on Linux
+whenever a branch changes the package: in the sandbox, or directly in a cloud session
 ([CONTRIBUTING](../CONTRIBUTING.md)).
 
 ## The desktop

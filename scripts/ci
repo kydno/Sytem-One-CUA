@@ -16,15 +16,17 @@
 #   mock        typesafe_computer_use/, pyproject.toml,  clicker-mock check: every oracle, no model
 #               uv.lock, sandbox/, compose.yaml,
 #               scripts/sandbox, tests/
-#   linux       the same as mock                        the tests again on Linux, in the sandbox
+#   linux       the same as mock                        the tests again on Linux, in the sandbox, off Linux
 #
 # A change to this script or scripts/ci-selftest, or a git error, turns every scope on. A rename
-# counts on both sides. scripts/ci-selftest, which runs this script against fakes, always runs. On a
-# Mac the mock check runs in scripts/sandbox, which `scripts/sandbox up` builds and starts first
-# (rebuilt when its files changed), never on this machine's screen, unless --mock-here says so. On
-# Linux (a cloud session) it runs directly. A check whose tool is missing is "not run", with
+# counts on both sides. scripts/ci-selftest, which runs this script against fakes, always runs. In a
+# cloud session (CLAUDE_CODE_REMOTE=true) or the sandbox itself the mock check runs directly.
+# Anywhere else, a Mac or a Linux workstation, it runs in scripts/sandbox, which `scripts/sandbox up`
+# builds and starts first (rebuilt when its files changed), never on this machine's screen, unless
+# --mock-here says so. A check whose tool is missing is "not run", with
 # why: never a pass; a sandbox that fails to build or sync is a failure, and a sandbox serving another
-# checkout is "not run". Exit 1 when a check that ran failed, 0 otherwise, and 2 for a bad argument.
+# checkout is "not run". Exit 1 when a check that ran failed or uv is missing (ruff and the tests
+# could not run), 0 otherwise, and 2 for a bad argument.
 # The table names the commit, says so when the tree had changes that commit does not hold, and is
 # followed by the scopes it covered. Its details go into a public pull request body, so none of them
 # carries a project, zone or path from this machine.
@@ -181,16 +183,31 @@ take_over_dead_lock() {
   rmdir "$mutex"
 }
 
+lock_problem=""
 take_sandbox_lock() {
-  local waited=0
+  local waited=0 misses=0
   until ln -s "$$" "$sandbox_lock" 2>/dev/null; do
+    # No lock there, yet none could be made: no such directory, no permission, or a file in the
+    # way. A holder that let go between the two looks the same once, so give it a few tries.
+    if [[ ! -L $sandbox_lock ]]; then
+      misses=$((misses + 1))
+      if [[ $misses -ge 3 ]]; then
+        lock_problem="the sandbox lock $sandbox_lock cannot be created"
+        return 1
+      fi
+      continue
+    fi
+    misses=0
     if ! lock_holder_alive; then
       take_over_dead_lock
       [[ -L $sandbox_lock ]] || continue
     fi
     [[ $waited == 0 ]] && echo "== waiting for another scripts/ci to finish with the sandbox"
     waited=$((waited + 1))
-    [[ $waited -ge 1200 ]] && return 1
+    if [[ $waited -ge 1200 ]]; then
+      lock_problem="another scripts/ci held the sandbox lock ($sandbox_lock) for 20 minutes"
+      return 1
+    fi
     sleep 1
   done
   have_lock=1
@@ -212,14 +229,24 @@ sandbox_taken() {
 }
 
 sandbox_problem=""
+sandbox_state=""
+# sandbox_ready: whether the sandbox can take this run's checks. The first call decides, and later
+# calls give the same answer: a second try would wait on this run's own lock.
 sandbox_ready() {
+  if [[ -z $sandbox_state ]]; then
+    if bring_up_sandbox; then sandbox_state=ready; else sandbox_state=unusable; fi
+  fi
+  [[ $sandbox_state == ready ]]
+}
+
+bring_up_sandbox() {
   local taken="the sandbox is serving another checkout; scripts/sandbox down, from any checkout, frees it"
   have docker || { sandbox_problem="Docker is not installed"; return 1; }
   docker info >/dev/null 2>&1 || { sandbox_problem="the Docker daemon is not running"; return 1; }
   # Before the lock, so a run from another checkout says so at once instead of waiting its turn,
   # and again after it, since the sandbox may have changed hands while this run waited.
   sandbox_taken && { sandbox_problem=$taken; return 1; }
-  take_sandbox_lock || { sandbox_problem="another scripts/ci held the sandbox lock ($sandbox_lock) for 20 minutes"; return 1; }
+  take_sandbox_lock || { sandbox_problem=$lock_problem; return 1; }
   sandbox_taken && { sandbox_problem=$taken; return 1; }
   check "sandbox up" scripts/sandbox up || { sandbox_problem="scripts/sandbox up failed"; return 1; }
 }
@@ -227,12 +254,15 @@ sandbox_ready() {
 # --- checks ------------------------------------------------------------------------------------
 
 if have uv; then
-  check "uv sync" uv sync --frozen --quiet
+  # --locked, not --frozen: a uv.lock that no longer matches pyproject.toml fails here.
+  check "uv sync" uv sync --locked --quiet
   check "ruff check" uv run --frozen ruff check .
   check "ruff format" uv run --frozen ruff format --check .
   check "pytest" uv run --frozen pytest -q
 else
+  # These are the checks every pull request needs, so their absence fails the run.
   not_run "python" "uv is not installed"
+  failed=1
 fi
 # Not inside a self-test's own runs, which use a copy of this script and fakes.
 [[ -z ${SCRIPTS_CI_IN_SELFTEST:-} ]] && check "ci self-test" scripts/ci-selftest
@@ -269,35 +299,45 @@ if [[ $infra == 1 ]]; then
     "osworld-gcp dry run" scripts/osworld-gcp --dry-run status
 fi
 
-if [[ $mock == 1 ]]; then
-  if [[ $(uname -s) == Linux ]]; then
-    if have uv && { have chromium || have google-chrome; }; then
-      check "mock check" uv run --frozen clicker-mock check
-    else
-      not_run "mock check" "needs uv and Chromium on PATH"
-    fi
+# A browser may start here without a yes only in a cloud session or in the sandbox itself (AGENTS.md).
+# Anywhere else, a Linux workstation included, the mock check goes to the sandbox, or runs here only
+# with --mock-here. The sandbox image sets SYSTEM_ONE_SANDBOX.
+browser_ok=0
+[[ ${CLAUDE_CODE_REMOTE:-} == true || -n ${SYSTEM_ONE_SANDBOX:-} ]] && browser_ok=1
+on_linux=0
+[[ $(uname -s) == Linux ]] && on_linux=1
+
+# linux_pytest: the tests on Linux, which on a Linux host are the pytest row already.
+linux_pytest() {
+  if [[ $on_linux == 1 ]]; then
     if have uv; then
       not_run "linux pytest" "this is Linux: the pytest row above is the Linux run"
     else
       not_run "linux pytest" "uv is not installed"
     fi
-  elif [[ $mock_here == 1 ]]; then
-    if have uv; then
-      check "mock check (this Mac)" uv run --frozen clicker-mock check
-    else
-      not_run "mock check (this Mac)" "uv is not installed"
-    fi
-    if sandbox_ready; then
-      check "linux pytest" docker compose exec --user agent sandbox uv run --frozen pytest -q
-    else
-      not_run "linux pytest" "$sandbox_problem"
-    fi
   elif sandbox_ready; then
-    check "mock check" docker compose exec --user agent sandbox uv run --frozen clicker-mock check
     check "linux pytest" docker compose exec --user agent sandbox uv run --frozen pytest -q
   else
-    not_run "mock check" "$sandbox_problem"
     not_run "linux pytest" "$sandbox_problem"
+  fi
+}
+
+if [[ $mock == 1 ]]; then
+  if [[ $browser_ok == 1 || $mock_here == 1 ]]; then
+    name="mock check"
+    [[ $browser_ok == 0 ]] && name="mock check (this machine)"
+    if have uv && { [[ $on_linux == 0 ]] || have chromium || have google-chrome; }; then
+      check "$name" uv run --frozen clicker-mock check
+    else
+      not_run "$name" "needs uv, and Chromium on PATH on Linux"
+    fi
+    linux_pytest
+  elif sandbox_ready; then
+    check "mock check" docker compose exec --user agent sandbox uv run --frozen clicker-mock check
+    linux_pytest
+  else
+    not_run "mock check" "$sandbox_problem"
+    linux_pytest
   fi
 fi
 

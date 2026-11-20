@@ -99,9 +99,11 @@ the commit. Name every check that was not run, and why. Never imply it passed. A
 needs the run again. Do not merge with a failed check, or with valid review findings left
 unaddressed. A reviewer's comments are review, not a test run.
 
-`scripts/ci` needs no approval. On a Mac it runs the mock check in `scripts/sandbox`, never on
-this machine's screen. `scripts/ci --mock-here` launches a Chromium on this Mac, so it needs a yes
-first, like any other `clicker-mock check` here. What the checks are and when each runs is in
+`scripts/ci` needs no approval. Outside a cloud session and the sandbox, on a Mac or any other
+machine, it runs the mock check in `scripts/sandbox`, never on this machine's screen.
+`scripts/ci --mock-here` launches a Chromium on this machine, so it needs a yes first, like any
+other `clicker-mock check` here. A check that is not run for want of its tool, on files the branch
+changes, still has to pass somewhere before merge. What the checks are and when each runs is in
 `CONTRIBUTING.md`.
 
 ## PR review loop

@@ -7,7 +7,7 @@ build` and `profile check`; tuning the suite to 70 to 85% solved and a first bas
 need the real models; and `scripts/sandbox run clicker-mock check`, which was not run, for want
 of a Docker daemon where it was built. Open question 3 is settled: there is no hosted CI, and
 `scripts/ci`, the local merge gate, runs `clicker-mock check` whenever a branch changes the package:
-in the sandbox on a Mac, directly on Linux. The open questions
+in the sandbox, or directly in a cloud session. The open questions
 below still stand. Where the build had to pick, it took the option that needs no answer: the
 adapter-only crop (question 1), and hand-written DOM with the system's own font (question 2).
 
@@ -809,7 +809,7 @@ From `AGENTS.md` and `CONTRIBUTING.md`, as they apply here:
 2. **Vendoring**: one UI library file and one font file, each with its license, in the repository?
 3. **A CI job that launches Chromium** to run `clicker-mock check` on every push? It asks no model,
    and it runs on GitHub's machine, not the Mac. (Settled: no hosted CI since #38. `scripts/ci`
-   runs the check locally as part of the merge gate: in the sandbox on a Mac, directly on Linux.)
+   runs the check locally as part of the merge gate: in the sandbox, or directly in a cloud session.)
 4. **Which models a pass runs on.** `benchmarks/replay/config.json` fixes them for `clicker-eval`:
    Jev for decisions, and a free model for answers. A mock pass scores the writer and the
    hand-offs, so here the answer model is most of the bill and much of the result. For speed and

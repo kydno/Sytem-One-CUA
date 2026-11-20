@@ -66,7 +66,8 @@ ci() {
   while [[ $# -gt 0 && $1 != -- ]]; do vars+=("$1"); shift; done
   [[ $# -gt 0 ]] && shift
   args=("$@")
-  out=$(cd "$repo" && env PATH="$fakes:$PATH" SCRIPTS_CI_SANDBOX_LOCK="$lock" SCRIPTS_CI_IN_SELFTEST=1 \
+  # Neither a cloud session nor the sandbox, unless a case says so.
+  out=$(cd "$repo" && env -u CLAUDE_CODE_REMOTE -u SYSTEM_ONE_SANDBOX PATH="$fakes:$PATH" TMPDIR="$scratch" SCRIPTS_CI_SANDBOX_LOCK="$lock" SCRIPTS_CI_IN_SELFTEST=1 \
     FAKE_OWNER="$repo" ${vars[@]+"${vars[@]}"} scripts/ci ${args[@]+"${args[@]}"} 2>&1)
   rc=$?
 }
@@ -92,10 +93,16 @@ exits "no change" 0
 
 g mv typesafe_computer_use/x.py docs/x.py
 g commit -qm "move a file out of the package"
-ci
+ci CLAUDE_CODE_REMOTE=true
 has "a rename out of a scope" '^scopes from .*: python mock linux$'
-has "linux runs the mock check" '^\| mock check \| passed \|'
+has "a cloud session runs the mock check here" '^\| mock check \| passed \| fake uv run --frozen clicker-mock check'
 has "linux names its pytest row" '^\| linux pytest \| not run \| this is Linux'
+ci SYSTEM_ONE_SANDBOX=1
+has "the sandbox runs the mock check here" '^\| mock check \| passed \| fake uv run --frozen clicker-mock check'
+ci
+has "a Linux workstation sends the mock check to the sandbox" '^\| mock check \| passed \| fake docker compose exec'
+has "a Linux workstation brings the sandbox up" '^\| sandbox up \| passed \|'
+has "a Linux workstation names its pytest row" '^\| linux pytest \| not run \| this is Linux'
 reset
 
 printf 'x\n' >"$repo/typesafe_computer_use/caf$(printf '\303\251').py"
@@ -143,7 +150,8 @@ has "a sandbox that fails to come up" '^\| mock check \| not run \| scripts/sand
 exits "a sandbox that fails to come up" 1
 
 ci FAKE_UNAME=Darwin -- --mock-here
-has "--mock-here" '^\| mock check \(this Mac\) \| passed \|'
+has "--mock-here" '^\| mock check \(this machine\) \| passed \|'
+lacks "--mock-here keeps the browser off the sandbox" 'fake docker compose exec --user agent sandbox uv run --frozen clicker-mock'
 
 # A lock whose holder has died is taken over.
 sh -c 'exit 0' &
@@ -171,6 +179,14 @@ ci FAKE_UNAME=Darwin
 has "a live run's lock" 'waiting for another scripts/ci'
 has "a live run's lock" '^\| sandbox up \| passed \|'
 wait "$holder"
+
+# A lock that cannot be made at all is "not run", at once, not a wait or a spin.
+ci FAKE_UNAME=Darwin SCRIPTS_CI_SANDBOX_LOCK="$scratch/no/such/dir/sandbox.lock"
+has "a lock that cannot be made" '^\| mock check \| not run \| the sandbox lock .* cannot be created'
+exits "a lock that cannot be made" 0
+touch "$scratch/a-file.lock"
+ci FAKE_UNAME=Darwin SCRIPTS_CI_SANDBOX_LOCK="$scratch/a-file.lock"
+has "a file in the lock's place" '^\| mock check \| not run \| the sandbox lock .* cannot be created'
 
 # A run from another checkout holds the lock and the sandbox: this one says so at once.
 sleep 5 &
