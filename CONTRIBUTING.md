@@ -83,7 +83,7 @@ checks above. The reviewer does not run them and does not report what they would
    replies as claims to verify. If the session started before the agent file existed and
    `pr-reviewer` is not in its agent list, use a general-purpose agent on Sonnet at extra high
    effort whose prompt is `Act as the agent in .claude/agents/pr-reviewer.md. Review PR #<n> @ <head sha>.`
-   followed by the `AGENTS.md` rule "Never take over the machine without explicit approval", word
+   followed by an optional note on where the checkout is and which tool reads GitHub, and then the `AGENTS.md` rule "Never take over the machine without explicit approval", word
    for word, since that agent has not read the file yet. The reviewer reads both as process, not
    notes. That agent also does not get the file's `tools` allowlist, so its read-only rule is a
    prompt rule only: start a new session, which picks up the agent file, when you can.
@@ -97,12 +97,16 @@ checks above. The reviewer does not run them and does not report what they would
      a finding you think is wrong, write why in a reply comment on the PR, so the next round reads
      it there. That comment is the only place your side of a finding goes. Rerun the checks the fix
      touches, update the PR body, push, and go back to step 1.
-   - `owner`: stop and put the `owner call` items to the owner in one short list. Resume from
-     step 3 once they answer.
+   - `owner`: stop and put the `owner call` items to the owner in one short list. Once they
+     answer, post one comment per answer headed `Owner decision on round <N> #<finding>`, quoting
+     their words, make any change they asked for, push, and go back to step 1. The reviewer drops
+     an item an `Owner decision` comment settles; your own replies do not settle it, because the
+     owner and you may post from the same account.
 
 ### When it stops
 
-There is no cap on rounds. The loop ends at `ready`, at `owner`, or when the owner closes, merges,
+There is no cap on rounds. The loop ends at `ready`, pauses at `owner` until the owner answers, or
+ends when the owner closes, merges,
 or says stop. If the reviewer repeats a finding after your reply without a new reason, do not push a
 third answer: treat it as an `owner call`.
 

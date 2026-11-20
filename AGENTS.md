@@ -96,7 +96,8 @@ needs no approval, and neither do its offline commands (`harvest`, `check`, `dig
 After every push to an open PR, run the review loop: wait about 2 minutes, skip if the PR was
 merged, closed, or pushed again, then run the `pr-reviewer` agent (Sonnet, extra high) with only
 `Review PR #<n> @ <head sha>.` as its prompt, post its round on the PR, fix, push, and repeat until
-it says `ready` ([CONTRIBUTING.md](CONTRIBUTING.md) § PR review loop). No round cap.
+it says `ready`. At `owner`, stop and ask the owner, then record their answer as an `Owner decision`
+comment and go on ([CONTRIBUTING.md](CONTRIBUTING.md) § PR review loop). No round cap.
 
 ## Everything else
 
