@@ -1,13 +1,15 @@
 """The guard in conftest.py: a test that forgets to patch the machine fails instead of driving it."""
 
+import importlib
 import os
 import socket
 import subprocess
 import urllib.request
 from pathlib import Path
 
+import anthropic
 import httpx
-import httpx2
+import openai
 import pytest
 
 from typesafe_computer_use import macos, windows
@@ -89,13 +91,27 @@ def test_no_browser_process_or_network_is_reachable(touch, tmp_path):
         touch(tmp_path)
 
 
+def _refused_by_the_guard(exc: BaseException | None) -> bool:
+    """An SDK wraps the guard's refusal in its own connection error, so look down the chain."""
+    while exc is not None:
+        if isinstance(exc, RuntimeError) and "real machine" in str(exc):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
 @pytest.mark.parametrize(
     "touch",
     [
         lambda: urllib.request.urlopen("https://example.com", timeout=1),
         lambda: httpx.get("https://example.com", timeout=1),
-        lambda: httpx2.get("https://example.com", timeout=1),
+        # httpx2 comes in with the Anthropic SDK; imported here, a release without it fails this case only.
+        lambda: importlib.import_module("httpx2").get("https://example.com", timeout=1),
+        # Each SDK builds its own proxy map from its own copy of getproxies.
+        lambda: anthropic.Anthropic(api_key="x", base_url="https://example.com", max_retries=0, timeout=1).models.list(),
+        lambda: openai.OpenAI(api_key="x", base_url="https://example.com/v1", max_retries=0, timeout=1).models.list(),
     ],
+    ids=["urllib", "httpx", "httpx2", "anthropic", "openai"],
 )
 def test_a_proxy_on_loopback_does_not_carry_a_request_out(touch, monkeypatch):
     # A proxy that listens here would pass the loopback check and forward the request anywhere.
@@ -105,8 +121,12 @@ def test_a_proxy_on_loopback_does_not_carry_a_request_out(touch, monkeypatch):
         host, port = proxy.getsockname()
         for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
             monkeypatch.setenv(name, f"http://{host}:{port}")
-        with pytest.raises(RuntimeError, match="real machine"):
+        try:
             touch()
+        except Exception as exc:
+            assert _refused_by_the_guard(exc), f"{exc!r} is not the guard's refusal"
+        else:
+            pytest.fail("the request went through")
 
 
 def test_a_server_the_test_started_on_loopback_is_still_reachable():
