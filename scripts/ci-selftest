@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Runs scripts/ci against fakes in a scratch repository, to check its own logic: the scopes, the
+# mark for uncommitted changes, the table's escaping, the exit codes, and the Mac sandbox paths with
+# their lock. uv, uname, docker, a browser and scripts/sandbox are all stand-ins, so it needs only
+# bash and git, starts nothing, asks no model, and writes nothing outside its scratch directory.
+# scripts/ci runs it every time. Exit 1 when an expectation fails.
+set -uo pipefail
+here=$(cd "$(dirname "$0")/.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/ci-selftest.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+fakes=$scratch/bin
+repo=$scratch/repo
+lock=$scratch/sandbox.lock
+mkdir -p "$fakes" "$repo/scripts" "$repo/typesafe_computer_use" "$repo/docs"
+
+# --- the stand-ins ----------------------------------------------------------------------------
+
+# uv prints FAKE_UV_LAST as its last line, if set, and fails a command that contains FAKE_UV_FAIL.
+cat >"$fakes/uv" <<'EOF'
+#!/bin/sh
+echo "${FAKE_UV_LAST:-fake uv $*}"
+case "$*" in *"${FAKE_UV_FAIL:-no command has this in it}"*) exit 1 ;; esac
+EOF
+cat >"$fakes/uname" <<'EOF'
+#!/bin/sh
+echo "${FAKE_UNAME:-Linux}"
+EOF
+# docker: a sandbox runs when FAKE_ID is set, serving the checkout FAKE_OWNER.
+cat >"$fakes/docker" <<'EOF'
+#!/bin/sh
+case "$*" in
+  info) ;;
+  "compose ps --quiet sandbox") [ -n "${FAKE_ID:-}" ] && echo abc ;;
+  inspect*working_dir*) echo "${FAKE_OWNER:-}" ;;
+  *) echo "fake docker $*" ;;
+esac
+EOF
+printf '#!/bin/sh\n' >"$fakes/chromium"
+chmod +x "$fakes"/*
+
+cp "$here/scripts/ci" "$repo/scripts/ci"
+cat >"$repo/scripts/sandbox" <<'EOF'
+#!/bin/sh
+echo "fake sandbox $*"
+exit "${FAKE_SANDBOX_EXIT:-0}"
+EOF
+chmod +x "$repo/scripts/sandbox"
+echo x >"$repo/typesafe_computer_use/x.py"
+echo x >"$repo/docs/a.md"
+
+g() { git -C "$repo" -c user.name=selftest -c user.email=selftest@example.invalid -c commit.gpgsign=false "$@"; }
+g init -q
+g add -A
+g commit -qm base
+g update-ref refs/remotes/origin/main HEAD
+g tag base
+reset() { g reset -q --hard base; g clean -qfd; }
+
+# --- running it -------------------------------------------------------------------------------
+
+out=""
+rc=0
+# ci [VAR=value ...] [-- ARG ...]: run scripts/ci in the scratch repository with the stand-ins.
+ci() {
+  local vars=() args=()
+  while [[ $# -gt 0 && $1 != -- ]]; do vars+=("$1"); shift; done
+  [[ $# -gt 0 ]] && shift
+  args=("$@")
+  out=$(cd "$repo" && env PATH="$fakes:$PATH" SCRIPTS_CI_SANDBOX_LOCK="$lock" SCRIPTS_CI_IN_SELFTEST=1 \
+    FAKE_OWNER="$repo" ${vars[@]+"${vars[@]}"} scripts/ci ${args[@]+"${args[@]}"} 2>&1)
+  rc=$?
+}
+
+passed=0
+failures=0
+fail() {
+  echo "FAIL: $1"
+  printf '%s\n' "$out" | tail -n 25 | sed 's/^/    /'
+  failures=$((failures + 1))
+}
+# has WHAT REGEX: the last output has a line matching REGEX (grep -E).
+has() { if grep -Eq -- "$2" <<<"$out"; then passed=$((passed + 1)); else fail "$1: no line matches /$2/"; fi; }
+lacks() { if grep -Eq -- "$2" <<<"$out"; then fail "$1: a line matches /$2/"; else passed=$((passed + 1)); fi; }
+exits() { if [[ $rc == "$2" ]]; then passed=$((passed + 1)); else fail "$1: exit $rc, expected $2"; fi; }
+
+# --- scopes, the commit, the table -------------------------------------------------------------
+
+ci
+has "no change" '^scopes from changes since .*: python$'
+has "no change" '^\| Check \| Result @ [0-9a-f]+ \| Detail \|$'
+exits "no change" 0
+
+g mv typesafe_computer_use/x.py docs/x.py
+g commit -qm "move a file out of the package"
+ci
+has "a rename out of a scope" '^scopes from .*: python mock linux$'
+has "linux runs the mock check" '^\| mock check \| passed \|'
+has "linux names its pytest row" '^\| linux pytest \| not run \| this is Linux'
+reset
+
+printf 'x\n' >"$repo/typesafe_computer_use/caf$(printf '\303\251').py"
+ci
+has "an untracked file with an unusual name" '^scopes from .*: python mock linux$'
+has "an untracked file marks the table" '^\| Check \| Result @ [0-9a-f]+ \(uncommitted changes\) \|'
+reset
+
+ci FAKE_UV_LAST='<b>|c' FAKE_UV_FAIL=pytest
+has "a detail is escaped" '^\| ruff check \| passed \| &lt;b&gt;\\\|c \|$'
+has "a failed check" '^\| pytest \| FAILED \| exit 1, full log in '
+exits "a failed check" 1
+
+ci -- --base
+exits "--base without a ref" 2
+ci -- --nonsense
+exits "an unknown argument" 2
+out=$(cd "$repo/docs" && ../scripts/ci --help 2>&1)
+has "--help from a subdirectory" '^The merge gate, run on this checkout'
+
+# --- the Mac sandbox --------------------------------------------------------------------------
+
+echo y >>"$repo/typesafe_computer_use/x.py"
+g commit -qam "change the package"
+
+ci FAKE_UNAME=Darwin
+has "a sandbox that is down" '^\| sandbox up \| passed \|'
+has "a sandbox that is down" '^\| mock check \| passed \| fake docker compose exec --user agent sandbox uv run --frozen clicker-mock check'
+has "a sandbox that is down" '^\| linux pytest \| passed \|'
+exits "a sandbox that is down" 0
+[[ -e $lock || -L $lock ]] && fail "the lock is left behind"
+
+ci FAKE_UNAME=Darwin FAKE_ID=1
+has "a sandbox serving this checkout is brought up anyway" '^\| sandbox up \| passed \|'
+
+ci FAKE_UNAME=Darwin FAKE_ID=1 FAKE_OWNER=/no/such/checkout
+has "a sandbox serving another checkout" '^\| mock check \| not run \| the sandbox is serving another checkout'
+lacks "a sandbox serving another checkout is not brought up" '^\| sandbox up \|'
+lacks "a sandbox serving another checkout is not waited for" 'waiting for another'
+exits "a sandbox serving another checkout" 0
+
+ci FAKE_UNAME=Darwin FAKE_SANDBOX_EXIT=3
+has "a sandbox that fails to come up" '^\| sandbox up \| FAILED \|'
+has "a sandbox that fails to come up" '^\| mock check \| not run \| scripts/sandbox up failed'
+exits "a sandbox that fails to come up" 1
+
+ci FAKE_UNAME=Darwin -- --mock-here
+has "--mock-here" '^\| mock check \(this Mac\) \| passed \|'
+
+# A lock whose holder has died is taken over.
+sh -c 'exit 0' &
+dead=$!
+wait "$dead"
+ln -s "$dead" "$lock"
+ci FAKE_UNAME=Darwin
+has "a dead run's lock" '^\| sandbox up \| passed \|'
+lacks "a dead run's lock is not waited for" 'waiting for another'
+[[ -L $lock ]] && fail "a dead run's lock is left behind" && rm -f "$lock"
+
+# So is a takeover lock left by a run that died in the middle of one.
+ln -s "$dead" "$lock"
+mkdir "$lock.takeover"
+touch -t 202001010000 "$lock.takeover"
+ci FAKE_UNAME=Darwin
+has "a stale takeover lock" '^\| sandbox up \| passed \|'
+rm -rf "$lock" "$lock.takeover"
+
+# A live holder is waited for, then its lock is taken over once it has gone.
+sleep 2 &
+holder=$!
+ln -s "$holder" "$lock"
+ci FAKE_UNAME=Darwin
+has "a live run's lock" 'waiting for another scripts/ci'
+has "a live run's lock" '^\| sandbox up \| passed \|'
+wait "$holder"
+
+# A run from another checkout holds the lock and the sandbox: this one says so at once.
+sleep 5 &
+holder=$!
+ln -s "$holder" "$lock"
+ci FAKE_UNAME=Darwin FAKE_ID=1 FAKE_OWNER=/no/such/checkout
+has "another checkout's run" '^\| mock check \| not run \| the sandbox is serving another checkout'
+lacks "another checkout's run is not waited for" 'waiting for another'
+kill "$holder" 2>/dev/null
+wait "$holder" 2>/dev/null
+rm -f "$lock"
+
+echo "ci-selftest: $passed passed, $failures failed"
+[[ $failures == 0 ]]

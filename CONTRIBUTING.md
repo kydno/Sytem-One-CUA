@@ -36,8 +36,8 @@ uv run ruff check . && uv run ruff format .
 scripts/ci
 ```
 
-There is no hosted CI. The merge gate is `scripts/ci`, run on the branch tip. Ruff and the tests
-always run. The other checks turn on by what the branch changed since `origin/main`:
+There is no hosted CI. The merge gate is `scripts/ci`, run on the branch tip. Ruff, the tests and
+`scripts/ci-selftest` (the gate itself, run against fakes in a scratch repository) always run. The other checks turn on by what the branch changed since `origin/main`:
 
 | Scope | On when the branch changes | Runs |
 |---|---|---|
@@ -45,19 +45,20 @@ always run. The other checks turn on by what the branch changed since `origin/ma
 | infra | `infra/gcp/`, `scripts/osworld-gcp` | `terraform fmt -check`, `init -backend=false` (which needs registry.terraform.io or a provider mirror), `validate` and `test` against mock providers, `shellcheck` (on `scripts/ci` too), a `--dry-run status` |
 | mock, linux | `typesafe_computer_use/`, `tests/`, `pyproject.toml`, `uv.lock`, `sandbox/`, `compose.yaml`, `scripts/sandbox` | `clicker-mock check` (every oracle, no model) and the tests again on Linux. On a Mac both run in `scripts/sandbox`, after `scripts/sandbox up` builds and starts it. On Linux the mock check runs directly, and the pytest row is the Linux run |
 
-`scripts/ci --all` turns every scope on, and so does a change to the script itself. A rename counts
+`scripts/ci --all` turns every scope on, and so does a change to the script or its self-test. A rename counts
 for both its old and new path. It ends with a table: each check, whether it passed, failed or was not
 run, and the commit, marked when the tree held changes the commit does not. A line under it names the
 scopes that were on: a scope that was off has no rows. Put both in the pull request body. A check whose tool is missing (Docker, terraform, shellcheck) is "not run", with
 the reason, and the pull request says so: it is never a pass. A sandbox that fails to build or sync
-is a failure, not a missing tool. The sandbox is one container for every checkout: when it is serving
-another one, the sandbox checks are "not run" until `scripts/sandbox down` there, and two runs at once
-take turns with it. A push after the run needs the checks again. The tests are pure
+is a failure, not a missing tool. The sandbox is one container for every checkout. While it serves
+another checkout, the sandbox checks of this one are "not run", at once, and it stays that way after
+the other run ends: `scripts/sandbox down`, from any checkout, frees it. Two runs from the same
+checkout take turns with it. A push after the run needs the checks again. The tests are pure
 logic, and `tests/conftest.py` stands in for the platform modules where they cannot be installed,
 which is why they also run on Linux.
 
-On a Mac the mock check runs in the sandbox, never on the screen you are using. In a cloud session
-or the sandbox itself, which are Linux, it runs directly. `scripts/ci --mock-here` runs it on the
+On a Mac the mock check runs in the sandbox, never on the screen you are using. In a cloud session,
+which is Linux, it runs directly. `scripts/ci --mock-here` runs it on the
 Mac, which launches a Chromium there, so an agent asks first ([AGENTS.md](AGENTS.md)).
 
 Add a replay-based note to the PR when a change alters what the model sees:

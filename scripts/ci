@@ -18,10 +18,11 @@
 #               scripts/sandbox, tests/
 #   linux       the same as mock                        the tests again on Linux, in the sandbox
 #
-# A change to this script, or a git error, turns every scope on. A rename counts on both sides. On a
+# A change to this script or scripts/ci-selftest, or a git error, turns every scope on. A rename
+# counts on both sides. scripts/ci-selftest, which runs this script against fakes, always runs. On a
 # Mac the mock check runs in scripts/sandbox, which `scripts/sandbox up` builds and starts first
-# (rebuilt when its files changed), never on this machine's screen, unless --mock-here says so. On Linux (a cloud
-# session or the sandbox itself) it runs directly. A check whose tool is missing is "not run", with
+# (rebuilt when its files changed), never on this machine's screen, unless --mock-here says so. On
+# Linux (a cloud session) it runs directly. A check whose tool is missing is "not run", with
 # why: never a pass; a sandbox that fails to build or sync is a failure, and a sandbox serving another
 # checkout is "not run". Exit 1 when a check that ran failed, 0 otherwise, and 2 for a bad argument.
 # The table names the commit, says so when the tree had changes that commit does not hold, and is
@@ -30,6 +31,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 REPO=$(pwd -P)
+self="$REPO/scripts/ci"
 
 base=origin/main
 all=0
@@ -39,7 +41,7 @@ while [[ $# -gt 0 ]]; do
     --all) all=1 ;;
     --base) [[ $# -ge 2 ]] || { echo "scripts/ci: --base needs a ref" >&2; exit 2; }; base=$2; shift ;;
     --mock-here) mock_here=1 ;;
-    -h|--help) awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
+    -h|--help) awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$self"; exit 0 ;;
     *) echo "scripts/ci: unknown argument $1" >&2; exit 2 ;;
   esac
   shift
@@ -50,13 +52,15 @@ names=()
 states=()
 details=()
 failed=0
-sandbox_lock="${TMPDIR:-/tmp}/typesafe-computer-use-sandbox.lock"
+# One path for every run by this user, whatever TMPDIR a terminal or an agent harness sets: the
+# sandbox is one container for all of them. SCRIPTS_CI_SANDBOX_LOCK is for scripts/ci-selftest.
+sandbox_lock=${SCRIPTS_CI_SANDBOX_LOCK:-/tmp/typesafe-computer-use-sandbox-$(id -u).lock}
 have_lock=0
 # The logs stay when a check failed, since its row points at one. The sandbox lock never stays.
 # It runs as the EXIT trap, which shellcheck cannot follow.
 # shellcheck disable=SC2317
 finish() {
-  [[ $have_lock == 1 ]] && rm -rf "$sandbox_lock"
+  [[ $have_lock == 1 && $(readlink "$sandbox_lock" 2>/dev/null) == "$$" ]] && rm -f "$sandbox_lock"
   [[ $failed == 0 ]] && rm -rf "$logs"
 }
 trap finish EXIT
@@ -122,6 +126,7 @@ else
       scripts/ci) menubar=1; infra=1; mock=1 ;;
       menubar/*) menubar=1 ;;
       infra/gcp/*|scripts/osworld-gcp) infra=1 ;;
+      scripts/ci-selftest) menubar=1; infra=1; mock=1 ;;
       typesafe_computer_use/*|pyproject.toml|uv.lock|sandbox/*|compose.yaml|scripts/sandbox|tests/*) mock=1 ;;
     esac
   done <"$logs/changed"
@@ -153,15 +158,35 @@ echo
 # uv sync. Its failure is a FAILED row: a Dockerfile that no longer builds, or a dependency with no
 # Linux wheel, is what this is here to find.
 #
-# Two runs from two checkouts would each bring the sandbox up on their own files, so a lock holds it
-# from the ownership check to the end of the run. A lock whose run has died is taken over.
+# Two runs would each bring the sandbox up on their own files, so a lock holds it from the ownership
+# check to the end of the run. The lock is a symbolic link whose target is the holder's pid, made in
+# one step, so it never exists without its pid. A lock whose holder has died is taken over, under a
+# second, short-lived lock, so two waiters cannot both take it over and one cannot remove a lock
+# another has just made.
+lock_holder_alive() {
+  local pid
+  pid=$(readlink "$sandbox_lock" 2>/dev/null) || return 1
+  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
+}
+
+take_over_dead_lock() {
+  local mutex="$sandbox_lock.takeover"
+  # A takeover lasts milliseconds; one older than a minute was left by a run that died in it.
+  [[ -n $(find "$mutex" -maxdepth 0 -mmin +1 2>/dev/null) ]] && rmdir "$mutex" 2>/dev/null
+  mkdir "$mutex" 2>/dev/null || return 0
+  # Read again under the takeover lock: the lock may have changed hands since the caller looked.
+  if [[ -L $sandbox_lock ]] && ! lock_holder_alive; then
+    rm -f "$sandbox_lock"
+  fi
+  rmdir "$mutex"
+}
+
 take_sandbox_lock() {
-  local waited=0 pid
-  until mkdir "$sandbox_lock" 2>/dev/null; do
-    pid=$(cat "$sandbox_lock/pid" 2>/dev/null)
-    if [[ -n $pid ]] && ! kill -0 "$pid" 2>/dev/null; then
-      rm -rf "$sandbox_lock"
-      continue
+  local waited=0
+  until ln -s "$$" "$sandbox_lock" 2>/dev/null; do
+    if ! lock_holder_alive; then
+      take_over_dead_lock
+      [[ -L $sandbox_lock ]] || continue
     fi
     [[ $waited == 0 ]] && echo "== waiting for another scripts/ci to finish with the sandbox"
     waited=$((waited + 1))
@@ -169,7 +194,6 @@ take_sandbox_lock() {
     sleep 1
   done
   have_lock=1
-  echo $$ >"$sandbox_lock/pid"
 }
 
 # The checkout a running sandbox serves: compose's own label for the directory it ran in, resolved
@@ -180,20 +204,23 @@ sandbox_owner() {
   [[ -n $dir ]] && (cd "$dir" 2>/dev/null && pwd -P)
 }
 
+# Whether a running sandbox serves another checkout, or one that no longer exists.
+sandbox_taken() {
+  local id
+  id=$(docker compose ps --quiet sandbox 2>/dev/null)
+  [[ -n $id && $(sandbox_owner "$id") != "$REPO" ]]
+}
+
 sandbox_problem=""
 sandbox_ready() {
+  local taken="the sandbox is serving another checkout; scripts/sandbox down, from any checkout, frees it"
   have docker || { sandbox_problem="Docker is not installed"; return 1; }
   docker info >/dev/null 2>&1 || { sandbox_problem="the Docker daemon is not running"; return 1; }
-  take_sandbox_lock || { sandbox_problem="another scripts/ci held the sandbox for 20 minutes"; return 1; }
-  local id owner
-  id=$(docker compose ps --quiet sandbox 2>/dev/null)
-  if [[ -n $id ]]; then
-    owner=$(sandbox_owner "$id")
-    if [[ $owner != "$REPO" ]]; then
-      sandbox_problem="the sandbox is serving another checkout; scripts/sandbox down there, then run again"
-      return 1
-    fi
-  fi
+  # Before the lock, so a run from another checkout says so at once instead of waiting its turn,
+  # and again after it, since the sandbox may have changed hands while this run waited.
+  sandbox_taken && { sandbox_problem=$taken; return 1; }
+  take_sandbox_lock || { sandbox_problem="another scripts/ci held the sandbox lock ($sandbox_lock) for 20 minutes"; return 1; }
+  sandbox_taken && { sandbox_problem=$taken; return 1; }
   check "sandbox up" scripts/sandbox up || { sandbox_problem="scripts/sandbox up failed"; return 1; }
 }
 
@@ -207,6 +234,8 @@ if have uv; then
 else
   not_run "python" "uv is not installed"
 fi
+# Not inside a self-test's own runs, which use a copy of this script and fakes.
+[[ -z ${SCRIPTS_CI_IN_SELFTEST:-} ]] && check "ci self-test" scripts/ci-selftest
 
 if [[ $menubar == 1 ]]; then
   if [[ $(uname -s) == Darwin ]] && have swift; then
@@ -230,7 +259,7 @@ if [[ $infra == 1 ]]; then
   fi
   check "infra bash -n" syntax scripts/osworld-gcp infra/gcp/startup.sh
   if have shellcheck; then
-    check "shellcheck" shellcheck scripts/ci scripts/osworld-gcp infra/gcp/startup.sh
+    check "shellcheck" shellcheck scripts/ci scripts/ci-selftest scripts/osworld-gcp infra/gcp/startup.sh
   else
     not_run "shellcheck" "shellcheck is not installed"
   fi
