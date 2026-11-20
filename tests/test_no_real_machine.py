@@ -7,6 +7,7 @@ import urllib.request
 from pathlib import Path
 
 import httpx
+import httpx2
 import pytest
 
 from typesafe_computer_use import macos, windows
@@ -93,6 +94,7 @@ def test_no_browser_process_or_network_is_reachable(touch, tmp_path):
     [
         lambda: urllib.request.urlopen("https://example.com", timeout=1),
         lambda: httpx.get("https://example.com", timeout=1),
+        lambda: httpx2.get("https://example.com", timeout=1),
     ],
 )
 def test_a_proxy_on_loopback_does_not_carry_a_request_out(touch, monkeypatch):

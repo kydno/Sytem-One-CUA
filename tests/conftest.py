@@ -67,7 +67,6 @@ for _windows_module in ("psutil", "uiautomation", "win32api", "win32con", "win32
     if _absent(_windows_module):
         _stub(_windows_module)
 
-import httpx  # noqa: E402
 import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
 
@@ -156,13 +155,19 @@ def _loopback_only(monkeypatch, refuse) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
     # A proxy on this machine's loopback address would carry a request out to the network past
-    # the checks above: a cloud session has one in HTTPS_PROXY, and a Mac can set one system-wide.
-    # Every client goes direct instead, so a request for a remote host meets the refusal.
+    # the checks above: a cloud session has one in HTTPS_PROXY, and a Mac or Windows can set one
+    # system-wide, which urllib's getproxies reads past the environment. Every client goes direct
+    # instead, so a request for a remote host meets the refusal. httpx and httpx2 (under the
+    # Anthropic SDK) bind their own copy of getproxies at import, so every module holding the real
+    # one gets the stand-in; a module imported later binds the stand-in itself.
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(urllib.request, "getproxies", dict)
+    real_getproxies = urllib.request.getproxies
+    for module in list(sys.modules.values()):
+        # vars(), not getattr: a stand-in platform module raises on any attribute it lacks.
+        if getattr(module, "__dict__", {}).get("getproxies") is real_getproxies:
+            monkeypatch.setattr(module, "getproxies", dict)
     monkeypatch.setattr(urllib.request, "_opener", None)
-    monkeypatch.setattr(httpx._utils, "getproxies", dict)
 
 
 @pytest.fixture
