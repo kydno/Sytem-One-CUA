@@ -107,7 +107,12 @@ tier 3 if it does any of these, in code or in instructions a model follows:
   `tools` and `model`, permission keys in `.claude/settings*`, the machine rule, and any line that
   tells a model to run a command)
 
-A file you cannot place is tier 3 until you have read it and can say why it is lower. If a "docs"
+A file you cannot place is tier 3 until you have read it and can say why it is lower.
+
+This file is the review policy, so it is tier 3 in full, prose included. A change that loosens or
+removes a criterion already on the base branch, in this file, in `VISION.md`, or in the rules in
+`AGENTS.md`, is one `owner call` finding that names the rule and how it changed: the session whose
+PRs you gate should not relax the gate on its own say. If a "docs"
 change hides logic (a prompt string the model reads, an action name, an option label, an env var
 name, a CLI flag), review it as logic. If a logic change is a trivial rename, say so and move on.
 
@@ -122,18 +127,19 @@ Two checks run in every tier, docs and images included:
 
 README and `docs/`, `OBSERVATIONS.md`, `VISION.md`, comments and docstrings, `docs/banner.svg` and
 other images, the prose of skills and agent files under `.claude/` (not their frontmatter, the
-machine rule, or command lines, which are tier 3), and menu bar copy and layout. Say "looks fine"
+machine rule, or command lines, which are tier 3, and not this file, which is tier 3 in full), and
+menu bar copy and layout. Say "looks fine"
 for the tier at most, after the two every-tier checks. Do not comment on wording or visual choices. One exception: if a doc
 now states something the code does not do (a flag, a default, a command), that is one finding.
 
 ### Tier 2: quick pass
 
-Code that does none of the tier 3 things. Examples: tests under `tests/` (not the guard in
-`tests/conftest.py`), the top-level `report.py`, `timing.py`, `stand_ins.py`, mock OS task pages
-and `compare.py` / `replay.py`, `scripts/osworld` `setup` and `results`, `scripts/sandbox`,
-`bench/`, and menu bar views that only show state. Nothing in `typesafe_computer_use/evals/` is an
-example here: most of it reads `runs/` or `.private/` or writes `benchmarks/replay/`, so check each
-file against the tier 3 rule. Look for:
+Code that does none of the tier 3 things. Few files qualify by name, so the examples are short:
+tests that do not test the guard or a tier 3 path's safety (not `tests/conftest.py` or
+`tests/test_no_real_machine.py`), `timing.py`, the mock OS task content in `mockos/tasks/` and
+`mockos/web/`, `scripts/osworld` `setup` and `results`, `bench/`, and menu bar views that only
+show state. Everything else, including the rest of `evals/` and `mockos/`, is checked against the
+tier 3 rule file by file, and when in doubt it is tier 3. Look for:
 
 - Bugs and crashes: `None` handling, wrong error branch, off-by-one, date and timezone math,
   unclosed files or processes, a subprocess that hangs with no timeout, a shell script that breaks
@@ -155,15 +161,18 @@ evals spend and privacy path (`evals/budget.py`, `evals/decisions.py`, `evals/st
 the line between `.private/evals/` and the committed `benchmarks/replay/`, `evals/report.py`, whose
 rows `report --record` writes into `benchmarks/replay/`, `evals/cases.py` and `evals/digest.py`,
 which read `runs/`, and `evals/cli.py`, whose `decisions`, `batch`, `harvest` and `report` commands
-drive all of that), `mockos/passes.py`, `mockos/profile.py`, and the `run` command in
-`mockos/cli.py`, the
+drive all of that), `mockos/passes.py`, `mockos/profile.py`, `mockos/page.py` (starts Chromium
+over CDP), and the `run`, `check` and `open` commands in `mockos/cli.py`, the top-level
+`report.py` (writes the run folder and sends `log` events), `scripts/sandbox` (what the exempt
+sandbox starts, mounts and publishes), the
 parts of `scripts/osworld` that start VMs (`run-jev`, `run-luna`), the menu bar files that start a
 run, hold keys, or answer its questions (`RunModel.swift`, `RunPermission.swift`,
 `Permissions.swift`, `AgentProcess.swift`, `AgentEvent.swift`, `PermissionCard.swift`,
-`PermissionPicker.swift`, `SettingsView.swift`, `AbortKey.swift`, `EnvFile.swift`,
+`PermissionPicker.swift`, `SettingsView.swift`, `AbortKey.swift`, `AbortKeyRow.swift`,
+`EnvFile.swift`,
 `OpenRouter.swift`, `UsageLedger.swift`), agent and
 skill frontmatter and `.claude/settings*`, the platform layer (`platform_adapter.py`, `macos.py`, `windows.py`, `ax_walk.py`), the
-test guard in `tests/conftest.py`, `infra/gcp/` and `scripts/osworld-gcp`, `sandbox/` and
+test guard in `tests/conftest.py` and its test `tests/test_no_real_machine.py`, `infra/gcp/` and `scripts/osworld-gcp`, `sandbox/` and
 `compose.yaml`, and `pyproject.toml` / `uv.lock`. Read the related files as of the head sha
 (`git show`, `git grep`), not only the diff: [`docs/how-a-step-works.md`](../../docs/how-a-step-works.md),
 [`docs/layout.md`](../../docs/layout.md), and every caller of a changed function, action, field, or
