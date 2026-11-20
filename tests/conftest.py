@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import types
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -152,6 +153,23 @@ def _loopback_only(monkeypatch, refuse) -> None:
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+    # A proxy on this machine's loopback address would carry a request out to the network past
+    # the checks above: a cloud session has one in HTTPS_PROXY, and a Mac or Windows can set one
+    # system-wide, which urllib's getproxies reads past the environment. Every client goes direct
+    # instead, so a request for a remote host meets the refusal. httpx, httpx2 and the Anthropic
+    # SDK each bind their own copy of getproxies at import, so every loaded module holding the real
+    # one gets the stand-in, and monkeypatch puts it back after the test. A module first imported
+    # during a test binds the stand-in and keeps it for the session, which the guard wants anyway.
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    real_getproxies = urllib.request.getproxies
+    for module in list(sys.modules.values()):
+        # Its __dict__, not getattr(module, "getproxies"): a stand-in platform module raises on any
+        # attribute it lacks.
+        if getattr(module, "__dict__", {}).get("getproxies") is real_getproxies:
+            monkeypatch.setattr(module, "getproxies", dict)
+    monkeypatch.setattr(urllib.request, "_opener", None)
 
 
 @pytest.fixture
