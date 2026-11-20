@@ -97,7 +97,9 @@ After every push to an open PR, run the review loop: wait about 2 minutes, skip 
 merged, closed, or pushed again, then run the `pr-reviewer` agent (Sonnet, extra high) with only
 `Review PR #<n> @ <head sha>.` as its prompt, post its round on the PR, fix, push, and repeat until
 it says `ready`. At `owner`, stop and ask the owner, then record their answer as an `Owner decision`
-comment and go on ([CONTRIBUTING.md](CONTRIBUTING.md) § PR review loop). No round cap.
+comment and go on ([CONTRIBUTING.md](CONTRIBUTING.md) § PR review loop). No round cap. The
+one-line prompt still meets the subagent rule above: `.claude/agents/pr-reviewer.md` carries that
+rule word for word, and `tests/test_agent_files.py` keeps the copy equal to this file.
 
 ## Everything else
 

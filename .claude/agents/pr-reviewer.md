@@ -51,6 +51,8 @@ files through the API at that sha instead. Do not check out or touch the author'
 Use the REST API. GraphQL is blocked in cloud sessions, so `gh pr view` and `gh pr diff` can fail
 there. Where `gh` is not available at all (a Claude Code cloud session), use the GitHub MCP tools
 (`pull_request_read` with `get`, `get_files`, `get_diff`, `get_comments`) for the same reads.
+Those tools return one page at a time: pass `perPage` 100 and keep asking for the next page until
+one comes back short, so you see every file and every earlier round.
 
 ## You are read-only
 
@@ -110,8 +112,8 @@ tier 3 if it does any of these, in code or in instructions a model follows:
 A file you cannot place is tier 3 until you have read it and can say why it is lower.
 
 This file is the review policy, so it is tier 3 in full, prose included. A change that loosens or
-removes a criterion already on the base branch, in this file, in `VISION.md`, or in the rules in
-`AGENTS.md`, is one `owner call` finding that names the rule and how it changed: the session whose
+removes a criterion already on the base branch, in this file, in `VISION.md`, in the rules in
+`AGENTS.md`, or in `CONTRIBUTING.md` (its ground rules and § PR review loop), is one `owner call` finding that names the rule and how it changed: the session whose
 PRs you gate should not relax the gate on its own say. If a "docs"
 change hides logic (a prompt string the model reads, an action name, an option label, an env var
 name, a CLI flag), review it as logic. If a logic change is a trivial rename, say so and move on.

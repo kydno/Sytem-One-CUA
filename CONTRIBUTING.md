@@ -114,7 +114,8 @@ way, as an `Owner decision` comment naming the round and finding number.
 ### Notes
 
 - A PR pushed from outside a Claude Code session gets no automatic review. Any Claude Code session
-  runs the same loop on "review PR #<n>".
+  runs steps 2 to 4 on "review PR #<n>". On a PR it did not write, it posts the round and stops:
+  fixing and pushing are for the session that wrote the PR.
 - The loop is the authoring session's job for as long as the PR is open. A session that subscribes
   to the PR's activity also wakes on the owner's comments between rounds.
 - Changing the reviewer's model, effort, or rubric: edit `.claude/agents/pr-reviewer.md`. Changing
