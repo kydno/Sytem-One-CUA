@@ -149,10 +149,10 @@ fi
 
 if [[ $infra == 1 ]]; then
   if have terraform; then
-    check "terraform fmt" terraform fmt -check -recursive infra/gcp
-    check "terraform init" terraform -chdir=infra/gcp init -backend=false -input=false
-    check "terraform validate" terraform -chdir=infra/gcp validate
-    check "terraform test" terraform -chdir=infra/gcp test
+    check "terraform fmt" terraform fmt -no-color -check -recursive infra/gcp
+    check "terraform init" terraform -chdir=infra/gcp init -no-color -backend=false -input=false
+    check "terraform validate" terraform -chdir=infra/gcp validate -no-color
+    check "terraform test" terraform -chdir=infra/gcp test -no-color
   else
     not_run "terraform" "terraform is not installed"
   fi
