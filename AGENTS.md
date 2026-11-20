@@ -91,6 +91,21 @@ needs no approval, and neither do its offline commands (`harvest`, `check`, `dig
 - A real run on this Mac, to check a change in the real app, keeps the rule above: the user approves
   each command.
 
+## The merge gate is local
+
+There is no hosted CI. Before you call a pull request ready, and again before you merge one, run
+`scripts/ci` on its branch tip. Put its table in the pull request body: each check, its result, and
+the commit. Name every check that was not run, and why. Never imply it passed. A push after the run
+needs the run again. Do not merge with a failed check, or with valid review findings left
+unaddressed. A reviewer's comments are review, not a test run.
+
+`scripts/ci` needs no approval. Outside a cloud session and the sandbox, on a Mac or any other
+machine, it runs the mock check in `scripts/sandbox`, never on this machine's screen.
+`scripts/ci --mock-here` launches a Chromium on this machine, so it needs a yes first, like any
+other `clicker-mock check` here. A check that is not run for want of its tool, on files the branch
+changes, still has to pass somewhere before merge. What the checks are and when each runs is in
+`CONTRIBUTING.md`.
+
 ## PR review loop
 
 After every push to an open PR, run the review loop: wait about 2 minutes, skip if the PR was

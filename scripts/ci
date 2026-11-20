@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+# The merge gate, run on this checkout. The repository has no hosted CI, so a pull request is ready
+# only when this has run on its branch tip and its table is in the pull request body.
+#
+#   scripts/ci               the checks this branch's changes need, against origin/main
+#   scripts/ci --all         every check
+#   scripts/ci --base REF    compare against REF instead of origin/main
+#   scripts/ci --mock-here   on a Mac, run `clicker-mock check` here: it launches Chromium, so ask first
+#
+# Python (ruff and the tests) always runs. The rest turn on by what changed since the merge base,
+# committed or not:
+#
+#   menubar     menubar/                                swift build, bash -n on its scripts
+#   infra       infra/gcp/, scripts/osworld-gcp         terraform fmt, validate, test; shellcheck (with
+#                                                       this script); a dry run
+#   mock        typesafe_computer_use/, pyproject.toml,  clicker-mock check: every oracle, no model
+#               uv.lock, sandbox/, compose.yaml,
+#               scripts/sandbox, tests/
+#   linux       the same as mock                        the tests again on Linux, in the sandbox, off Linux
+#
+# A change to this script or scripts/ci-selftest, or a git error, turns every scope on. A rename
+# counts on both sides. scripts/ci-selftest, which runs this script against fakes, always runs. In a
+# cloud session (CLAUDE_CODE_REMOTE=true) or the sandbox itself the mock check runs directly.
+# Anywhere else, a Mac or a Linux workstation, it runs in scripts/sandbox, which `scripts/sandbox up`
+# builds and starts first (rebuilt when its files changed), never on this machine's screen, unless
+# --mock-here says so. A check whose tool is missing is "not run", with
+# why: never a pass; a sandbox that fails to build or sync is a failure, and a sandbox serving another
+# checkout is "not run". Exit 1 when a check that ran failed or uv is missing (ruff and the tests
+# could not run), 0 otherwise, and 2 for a bad argument.
+# The table names the commit, says so when the tree had changes that commit does not hold, and is
+# followed by the scopes it covered. Its details go into a public pull request body, so none of them
+# carries a project, zone or path from this machine.
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 2
+REPO=$(pwd -P)
+self="$REPO/scripts/ci"
+
+base=origin/main
+all=0
+mock_here=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all) all=1 ;;
+    --base) [[ $# -ge 2 ]] || { echo "scripts/ci: --base needs a ref" >&2; exit 2; }; base=$2; shift ;;
+    --mock-here) mock_here=1 ;;
+    -h|--help) awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$self"; exit 0 ;;
+    *) echo "scripts/ci: unknown argument $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+logs=$(mktemp -d "${TMPDIR:-/tmp}/scripts-ci.XXXXXX")
+names=()
+states=()
+details=()
+failed=0
+# One path for every run by this user, whatever TMPDIR a terminal or an agent harness sets: the
+# sandbox is one container for all of them. SCRIPTS_CI_SANDBOX_LOCK is for scripts/ci-selftest.
+sandbox_lock=${SCRIPTS_CI_SANDBOX_LOCK:-/tmp/typesafe-computer-use-sandbox-$(id -u).lock}
+have_lock=0
+# The logs stay when a check failed, since its row points at one. The sandbox lock never stays.
+# It runs as the EXIT trap, which shellcheck cannot follow.
+# shellcheck disable=SC2317
+finish() {
+  [[ $have_lock == 1 && $(readlink "$sandbox_lock" 2>/dev/null) == "$$" ]] && rm -f "$sandbox_lock"
+  [[ $failed == 0 ]] && rm -rf "$logs"
+}
+trap finish EXIT
+trap 'exit 130' INT TERM
+
+# record NAME STATE DETAIL. The detail goes into a public pull request body, so this checkout's path
+# and the home directory are shortened, a run folder is left out, and it is cut to 100 characters.
+record() {
+  local detail=$3 tilde='~'
+  detail=${detail%%; run folders:*}
+  detail=${detail//"$REPO"/.}
+  [[ -n ${HOME:-} && $HOME != / ]] && detail=${detail//"$HOME"/$tilde}
+  names+=("$1"); states+=("$2"); details+=("${detail:0:100}")
+}
+
+# check [--detail TEXT] NAME COMMAND...: run it, keep its output, and record the last line of output
+# as the detail, or TEXT when it passes. Returns the command's status.
+check() {
+  local fixed=""
+  if [[ $1 == --detail ]]; then fixed=$2; shift 2; fi
+  local name=$1; shift
+  local log="$logs/${#names[@]}.log"
+  printf '== %s: %s\n' "$name" "$*"
+  local status=0
+  "$@" >"$log" 2>&1 || status=$?
+  if [[ $status == 0 ]]; then
+    record "$name" passed "${fixed:-$(grep -v '^[[:space:]]*$' "$log" | tail -n 1)}"
+  else
+    echo "-- $name failed; the end of its output:"
+    tail -n 40 "$log"
+    record "$name" FAILED "exit $status, full log in $log"
+    failed=1
+  fi
+  return "$status"
+}
+
+not_run() { printf '== %s: not run, %s\n' "$1" "$2"; record "$1" "not run" "$2"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# syntax FILE...: bash -n on each, so a script that cannot even parse fails the gate.
+# It runs through check "$@", which shellcheck cannot follow.
+# shellcheck disable=SC2317
+syntax() { local s; for s in "$@"; do bash -n "$s" || return 1; done; }
+
+# --- scopes ------------------------------------------------------------------------------------
+
+menubar=0; infra=0; mock=0
+if [[ $all == 1 ]]; then
+  menubar=1; infra=1; mock=1
+  scope_note="every scope (--all)"
+elif ! merge_base=$(git merge-base "$base" HEAD 2>/dev/null); then
+  menubar=1; infra=1; mock=1
+  scope_note="every scope (no merge base with $base)"
+elif ! { git diff --name-only --no-renames -z "$merge_base" >"$logs/changed" \
+         && git ls-files -z --others --exclude-standard >>"$logs/changed"; } 2>/dev/null; then
+  menubar=1; infra=1; mock=1
+  scope_note="every scope (git could not list the changes)"
+else
+  # NUL-separated, so git neither quotes an unusual path nor folds a rename into its new name.
+  while IFS= read -r -d '' path; do
+    case "$path" in
+      scripts/ci) menubar=1; infra=1; mock=1 ;;
+      menubar/*) menubar=1 ;;
+      infra/gcp/*|scripts/osworld-gcp) infra=1 ;;
+      scripts/ci-selftest) menubar=1; infra=1; mock=1 ;;
+      typesafe_computer_use/*|pyproject.toml|uv.lock|sandbox/*|compose.yaml|scripts/sandbox|tests/*) mock=1 ;;
+    esac
+  done <"$logs/changed"
+  scope_note="changes since $(git rev-parse --short "$merge_base") ($base)"
+fi
+on=python
+[[ $menubar == 1 ]] && on="$on menubar"
+[[ $infra == 1 ]] && on="$on infra"
+[[ $mock == 1 ]] && on="$on mock linux"
+head=$(git rev-parse --short HEAD 2>/dev/null) || head="an unknown commit"
+# Untracked files count, whatever status.showUntrackedFiles says: they are checked too, and the
+# commit does not hold them. A tree git cannot read is not called clean.
+tree_note=""
+if ! status=$(git status --porcelain --untracked-files=all 2>/dev/null); then
+  tree_note="git status failed"
+elif [[ -n $status ]]; then
+  tree_note="uncommitted changes"
+fi
+echo "scripts/ci at $head${tree_note:+, $tree_note}"
+echo "scopes from $scope_note: $on"
+echo
+
+# --- the sandbox, for the checks that need Linux or a browser off this machine's screen ---------
+
+# The sandbox is one container for every checkout, so a running one may be serving another
+# checkout's files: that one is left alone, and its checks are "not run". Otherwise
+# `scripts/sandbox up` runs every time, not only when the sandbox is down. It rebuilds the image and
+# recreates the container when this branch changed them, leaves a current one as it is, and runs
+# uv sync. Its failure is a FAILED row: a Dockerfile that no longer builds, or a dependency with no
+# Linux wheel, is what this is here to find.
+#
+# Two runs would each bring the sandbox up on their own files, so a lock holds it from the ownership
+# check to the end of the run. The lock is a symbolic link whose target is the holder's pid, made in
+# one step, so it never exists without its pid. A lock whose holder has died is taken over, under a
+# second, short-lived lock, so two waiters cannot both take it over and one cannot remove a lock
+# another has just made.
+lock_holder_alive() {
+  local pid
+  pid=$(readlink "$sandbox_lock" 2>/dev/null) || return 1
+  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
+}
+
+take_over_dead_lock() {
+  local mutex="$sandbox_lock.takeover"
+  # A takeover lasts milliseconds; one older than a minute was left by a run that died in it.
+  [[ -n $(find "$mutex" -maxdepth 0 -mmin +1 2>/dev/null) ]] && rmdir "$mutex" 2>/dev/null
+  mkdir "$mutex" 2>/dev/null || return 0
+  # Read again under the takeover lock: the lock may have changed hands since the caller looked.
+  if [[ -L $sandbox_lock ]] && ! lock_holder_alive; then
+    rm -f "$sandbox_lock"
+  fi
+  rmdir "$mutex"
+}
+
+lock_problem=""
+take_sandbox_lock() {
+  local waited=0 misses=0
+  until ln -s "$$" "$sandbox_lock" 2>/dev/null; do
+    # No lock there, yet none could be made: no such directory, no permission, or a file in the
+    # way. A holder that let go between the two looks the same once, so give it a few tries.
+    if [[ ! -L $sandbox_lock ]]; then
+      misses=$((misses + 1))
+      if [[ $misses -ge 3 ]]; then
+        lock_problem="cannot create the sandbox lock $sandbox_lock"
+        return 1
+      fi
+      continue
+    fi
+    misses=0
+    if ! lock_holder_alive; then
+      take_over_dead_lock
+      [[ -L $sandbox_lock ]] || continue
+    fi
+    [[ $waited == 0 ]] && echo "== waiting for another scripts/ci to finish with the sandbox"
+    waited=$((waited + 1))
+    if [[ $waited -ge 1200 ]]; then
+      lock_problem="another scripts/ci held the sandbox lock for 20 minutes: $sandbox_lock"
+      return 1
+    fi
+    sleep 1
+  done
+  have_lock=1
+}
+
+# The checkout a running sandbox serves: compose's own label for the directory it ran in, resolved
+# here. Docker Desktop reports a bind mount's source as its VM sees it, which is not this path.
+sandbox_owner() {
+  local dir
+  dir=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$1" 2>/dev/null)
+  [[ -n $dir ]] && (cd "$dir" 2>/dev/null && pwd -P)
+}
+
+# Whether a running sandbox serves another checkout, or one that no longer exists.
+sandbox_taken() {
+  local id
+  id=$(docker compose ps --quiet sandbox 2>/dev/null)
+  [[ -n $id && $(sandbox_owner "$id") != "$REPO" ]]
+}
+
+sandbox_problem=""
+sandbox_state=""
+# sandbox_ready: whether the sandbox can take this run's checks. The first call decides, and later
+# calls give the same answer: a second try would wait on this run's own lock.
+sandbox_ready() {
+  if [[ -z $sandbox_state ]]; then
+    if bring_up_sandbox; then sandbox_state=ready; else sandbox_state=unusable; fi
+  fi
+  [[ $sandbox_state == ready ]]
+}
+
+bring_up_sandbox() {
+  local taken="the sandbox is serving another checkout; scripts/sandbox down, from any checkout, frees it"
+  have docker || { sandbox_problem="Docker is not installed"; return 1; }
+  docker info >/dev/null 2>&1 || { sandbox_problem="the Docker daemon is not running"; return 1; }
+  # Before the lock, so a run from another checkout says so at once instead of waiting its turn,
+  # and again after it, since the sandbox may have changed hands while this run waited.
+  sandbox_taken && { sandbox_problem=$taken; return 1; }
+  take_sandbox_lock || { sandbox_problem=$lock_problem; return 1; }
+  sandbox_taken && { sandbox_problem=$taken; return 1; }
+  check "sandbox up" scripts/sandbox up || { sandbox_problem="scripts/sandbox up failed"; return 1; }
+}
+
+# --- checks ------------------------------------------------------------------------------------
+
+if have uv; then
+  # --locked, not --frozen: a uv.lock that no longer matches pyproject.toml fails here.
+  check "uv sync" uv sync --locked --quiet
+  check "ruff check" uv run --frozen ruff check .
+  check "ruff format" uv run --frozen ruff format --check .
+  check "pytest" uv run --frozen pytest -q
+else
+  # These are the checks every pull request needs, so their absence fails the run.
+  not_run "python" "uv is not installed"
+  failed=1
+fi
+# Not inside a self-test's own runs, which use a copy of this script and fakes.
+if [[ -n ${SCRIPTS_CI_IN_SELFTEST:-} ]]; then
+  not_run "ci self-test" "SCRIPTS_CI_IN_SELFTEST is set: this is one of its own runs"
+else
+  check "ci self-test" scripts/ci-selftest
+fi
+
+if [[ $menubar == 1 ]]; then
+  if [[ $(uname -s) == Darwin ]] && have swift; then
+    # Only the compile: build.sh would create a signing identity in the login keychain.
+    check "menubar build" swift build --package-path menubar
+  else
+    not_run "menubar build" "needs swift on macOS 26"
+  fi
+  check "menubar scripts" syntax menubar/Scripts/*.sh
+fi
+
+if [[ $infra == 1 ]]; then
+  if have terraform; then
+    check "terraform fmt" terraform fmt -no-color -check -recursive infra/gcp
+    check --detail "providers from the lock file" \
+      "terraform init" terraform -chdir=infra/gcp init -no-color -backend=false -input=false
+    check "terraform validate" terraform -chdir=infra/gcp validate -no-color
+    check "terraform test" terraform -chdir=infra/gcp test -no-color
+  else
+    not_run "terraform" "terraform is not installed"
+  fi
+  check "infra bash -n" syntax scripts/osworld-gcp infra/gcp/startup.sh
+  if have shellcheck; then
+    check "shellcheck" shellcheck scripts/ci scripts/ci-selftest scripts/osworld-gcp infra/gcp/startup.sh
+  else
+    not_run "shellcheck" "shellcheck is not installed"
+  fi
+  # Prints the commands it would run and runs none: nothing reaches a cloud. Those commands name
+  # this machine's project, zone and instance, so they stay out of the table.
+  check --detail "prints the gcloud commands, runs none" \
+    "osworld-gcp dry run" scripts/osworld-gcp --dry-run status
+fi
+
+# A browser may start here without a yes only in a cloud session or in the sandbox itself (AGENTS.md).
+# Anywhere else, a Linux workstation included, the mock check goes to the sandbox, or runs here only
+# with --mock-here. The sandbox image sets SYSTEM_ONE_SANDBOX.
+browser_ok=0
+[[ ${CLAUDE_CODE_REMOTE:-} == true || -n ${SYSTEM_ONE_SANDBOX:-} ]] && browser_ok=1
+on_linux=0
+[[ $(uname -s) == Linux ]] && on_linux=1
+
+# linux_pytest: the tests on Linux, which on a Linux host are the pytest row already.
+linux_pytest() {
+  if [[ $on_linux == 1 ]]; then
+    if have uv; then
+      not_run "linux pytest" "this is Linux: the pytest row above is the Linux run"
+    else
+      not_run "linux pytest" "uv is not installed"
+    fi
+  elif sandbox_ready; then
+    check "linux pytest" docker compose exec --user agent sandbox uv run --frozen pytest -q
+  else
+    not_run "linux pytest" "$sandbox_problem"
+  fi
+}
+
+if [[ $mock == 1 ]]; then
+  if [[ $browser_ok == 1 || $mock_here == 1 ]]; then
+    name="mock check"
+    [[ $browser_ok == 0 ]] && name="mock check (this machine)"
+    if have uv && { [[ $on_linux == 0 ]] || have chromium || have google-chrome; }; then
+      check "$name" uv run --frozen clicker-mock check
+    else
+      not_run "$name" "needs uv, and Chromium on PATH on Linux"
+    fi
+    linux_pytest
+  elif sandbox_ready; then
+    check "mock check" docker compose exec --user agent sandbox uv run --frozen clicker-mock check
+    linux_pytest
+  else
+    not_run "mock check" "$sandbox_problem"
+    linux_pytest
+  fi
+fi
+
+# --- the table for the pull request body -------------------------------------------------------
+
+echo
+echo "| Check | Result @ $head${tree_note:+ ($tree_note)} | Detail |"
+echo "|---|---|---|"
+for i in "${!names[@]}"; do
+  # Escaped for a markdown table: a pipe ends a cell, and GitHub drops what reads as an HTML tag.
+  detail=${details[$i]//|/\\|}
+  detail=${detail//</"&lt;"}
+  detail=${detail//>/"&gt;"}
+  printf '| %s | %s | %s |\n' "${names[$i]}" "${states[$i]}" "$detail"
+done
+echo
+echo "Scopes: $on, from $scope_note. A scope that is off has no rows."
+exit "$failed"

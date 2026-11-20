@@ -33,14 +33,48 @@ a harness one. Every stop rule in the loop was found or fixed that way.
 
 ```
 uv run ruff check . && uv run ruff format .
-uv run pytest -q
+scripts/ci
 ```
 
-There is no CI, so run these yourself. The tests are pure logic, and `tests/conftest.py` stands in
-for the platform modules where they cannot be installed, so they also run on Linux. A change to
-`infra/gcp` or `scripts/osworld-gcp` should pass `terraform fmt -check`, `terraform validate`,
-`terraform test` and `shellcheck` locally. A change to the menu bar app in `menubar/` should pass
-`swift build` and also needs a run by hand.
+There is no hosted CI. The merge gate is `scripts/ci`, run on the branch tip. Ruff, the tests and
+`scripts/ci-selftest` (the gate itself, run against fakes in a scratch repository) always run.
+`uv sync --locked` fails when `uv.lock` no longer matches `pyproject.toml`, and without uv the gate
+fails. The other checks turn on by what the branch changed since `origin/main`, committed or not:
+
+| Scope | On when the branch changes | Runs |
+|---|---|---|
+| menubar | `menubar/` | `swift build`, and `bash -n` on its scripts. A change there also needs a run by hand |
+| infra | `infra/gcp/`, `scripts/osworld-gcp` | `terraform fmt -check`, `init -backend=false` (which needs registry.terraform.io or a provider mirror), `validate` and `test` against mock providers, `shellcheck` (on `scripts/ci` and its self-test too), a `--dry-run status` |
+| mock, linux | `typesafe_computer_use/`, `tests/`, `pyproject.toml`, `uv.lock`, `sandbox/`, `compose.yaml`, `scripts/sandbox` | `clicker-mock check` (every oracle, no model), and the tests again on Linux when this machine is not Linux |
+
+`scripts/ci --all` turns every scope on, and so does a change to the script or its self-test. A
+rename counts for both its old and new path. The run ends with a table, then a line naming the
+scopes that were on; a scope that was off has no rows. The table gives each check, whether it
+passed, failed or was not run, and the commit, marked when the tree held changes the commit does
+not. Put both in the pull request body. A push after the run needs the checks again.
+
+**Not run.** A check whose tool is missing (Docker, Swift, terraform, shellcheck) is "not run", with
+the reason: never a pass. A sandbox that fails to build or sync is a failure, not a missing tool.
+
+- When the branch changes the files a not-run check covers, the check still has to pass before
+  merge: run it somewhere that has the tool, on the same changes, and say in the pull request where
+  and at which commit.
+- When its scope is on only because of `--all`, or because `scripts/ci` or its self-test changed,
+  it may stay "not run", with the reason: the branch does not change what it checks.
+
+**Where the mock check runs.** In a cloud session (`CLAUDE_CODE_REMOTE=true`) or in the sandbox
+itself (`SYSTEM_ONE_SANDBOX`, set by its image), a browser may start without asking, so it runs
+directly. Anywhere else, a Mac or a Linux workstation, it runs in `scripts/sandbox`, after
+`scripts/sandbox up` builds and starts it, never on the screen you are using.
+`scripts/ci --mock-here` runs it on this machine instead, which launches a Chromium here, so an
+agent asks first ([AGENTS.md](AGENTS.md)).
+
+**The sandbox is one container for every checkout.** While it serves another checkout, this one's
+sandbox checks are "not run", at once. That holds after the other run ends, until
+`scripts/sandbox down`, from any checkout, frees it. Two runs from the same checkout take turns.
+
+The tests are pure logic, and `tests/conftest.py` stands in for the platform modules where they
+cannot be installed, which is why they also run on Linux.
 
 Add a replay-based note to the PR when a change alters what the model sees:
 which run folder, which step, what the decision was before and after. `clicker-eval size` gives the
