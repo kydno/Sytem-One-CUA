@@ -15,19 +15,21 @@
 #                                                       this script); a dry run
 #   mock        typesafe_computer_use/, pyproject.toml,  clicker-mock check: every oracle, no model
 #               uv.lock, sandbox/, compose.yaml,
-#               scripts/sandbox
+#               scripts/sandbox, tests/
 #   linux       the same as mock                        the tests again on Linux, in the sandbox
 #
 # A change to this script, or a git error, turns every scope on. A rename counts on both sides. On a
 # Mac the mock check runs in scripts/sandbox, which `scripts/sandbox up` builds and starts first
 # (rebuilt when its files changed), never on this machine's screen, unless --mock-here says so. On Linux (a cloud
 # session or the sandbox itself) it runs directly. A check whose tool is missing is "not run", with
-# why: never a pass; a sandbox that fails to build or sync is a failure. Exit 1 when a check that ran
-# failed, 0 otherwise, and 2 for a bad argument. The table names the commit, and says so when the
-# tree had changes that commit does not hold.
+# why: never a pass; a sandbox that fails to build or sync is a failure, and a sandbox serving another
+# checkout is "not run". Exit 1 when a check that ran failed, 0 otherwise, and 2 for a bad argument.
+# The table names the commit, says so when the tree had changes that commit does not hold, and is
+# followed by the scopes it covered. Its details go into a public pull request body, so none of them
+# carries a project, zone or path from this machine.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
-REPO=$(pwd)
+REPO=$(pwd -P)
 
 base=origin/main
 all=0
@@ -48,25 +50,40 @@ names=()
 states=()
 details=()
 failed=0
+sandbox_lock="${TMPDIR:-/tmp}/typesafe-computer-use-sandbox.lock"
+have_lock=0
+# The logs stay when a check failed, since its row points at one. The sandbox lock never stays.
+# It runs as the EXIT trap, which shellcheck cannot follow.
+# shellcheck disable=SC2317
+finish() {
+  [[ $have_lock == 1 ]] && rm -rf "$sandbox_lock"
+  [[ $failed == 0 ]] && rm -rf "$logs"
+}
+trap finish EXIT
+trap 'exit 130' INT TERM
 
 # record NAME STATE DETAIL. The detail goes into a public pull request body, so this checkout's path
-# and the home directory are shortened.
+# and the home directory are shortened, a run folder is left out, and it is cut to 100 characters.
 record() {
   local detail=$3 tilde='~'
+  detail=${detail%%; run folders:*}
   detail=${detail//"$REPO"/.}
   [[ -n ${HOME:-} && $HOME != / ]] && detail=${detail//"$HOME"/$tilde}
-  names+=("$1"); states+=("$2"); details+=("$detail")
+  names+=("$1"); states+=("$2"); details+=("${detail:0:100}")
 }
 
-# check NAME COMMAND...: run it, keep its output, and record the last line of output as the detail.
+# check [--detail TEXT] NAME COMMAND...: run it, keep its output, and record the last line of output
+# as the detail, or TEXT when it passes. Returns the command's status.
 check() {
+  local fixed=""
+  if [[ $1 == --detail ]]; then fixed=$2; shift 2; fi
   local name=$1; shift
   local log="$logs/${#names[@]}.log"
   printf '== %s: %s\n' "$name" "$*"
   local status=0
   "$@" >"$log" 2>&1 || status=$?
   if [[ $status == 0 ]]; then
-    record "$name" passed "$(grep -v '^[[:space:]]*$' "$log" | tail -n 1 | cut -c1-100)"
+    record "$name" passed "${fixed:-$(grep -v '^[[:space:]]*$' "$log" | tail -n 1)}"
   else
     echo "-- $name failed; the end of its output:"
     tail -n 40 "$log"
@@ -105,7 +122,7 @@ else
       scripts/ci) menubar=1; infra=1; mock=1 ;;
       menubar/*) menubar=1 ;;
       infra/gcp/*|scripts/osworld-gcp) infra=1 ;;
-      typesafe_computer_use/*|pyproject.toml|uv.lock|sandbox/*|compose.yaml|scripts/sandbox) mock=1 ;;
+      typesafe_computer_use/*|pyproject.toml|uv.lock|sandbox/*|compose.yaml|scripts/sandbox|tests/*) mock=1 ;;
     esac
   done <"$logs/changed"
   scope_note="changes since $(git rev-parse --short "$merge_base") ($base)"
@@ -114,31 +131,66 @@ on=python
 [[ $menubar == 1 ]] && on="$on menubar"
 [[ $infra == 1 ]] && on="$on infra"
 [[ $mock == 1 ]] && on="$on mock linux"
-head=$(git rev-parse --short HEAD)
-# Untracked files count: they are checked too, and the commit does not hold them.
-dirty=""
-[[ -n $(git status --porcelain 2>/dev/null) ]] && dirty=" plus uncommitted changes"
-echo "scripts/ci at $head$dirty"
+head=$(git rev-parse --short HEAD 2>/dev/null) || head="an unknown commit"
+# Untracked files count, whatever status.showUntrackedFiles says: they are checked too, and the
+# commit does not hold them. A tree git cannot read is not called clean.
+tree_note=""
+if ! status=$(git status --porcelain --untracked-files=all 2>/dev/null); then
+  tree_note="git status failed"
+elif [[ -n $status ]]; then
+  tree_note="uncommitted changes"
+fi
+echo "scripts/ci at $head${tree_note:+, $tree_note}"
 echo "scopes from $scope_note: $on"
 echo
 
 # --- the sandbox, for the checks that need Linux or a browser off this machine's screen ---------
 
 # The sandbox is one container for every checkout, so a running one may be serving another
-# checkout's files: that one is left alone. Otherwise `scripts/sandbox up` runs every time, not only
-# when the sandbox is down. It rebuilds the image and recreates the container when this branch
-# changed them, leaves a current one as it is, and runs uv sync. Its failure is a FAILED row: a
-# Dockerfile that no longer builds, or a dependency with no Linux wheel, is what this is here to find.
+# checkout's files: that one is left alone, and its checks are "not run". Otherwise
+# `scripts/sandbox up` runs every time, not only when the sandbox is down. It rebuilds the image and
+# recreates the container when this branch changed them, leaves a current one as it is, and runs
+# uv sync. Its failure is a FAILED row: a Dockerfile that no longer builds, or a dependency with no
+# Linux wheel, is what this is here to find.
+#
+# Two runs from two checkouts would each bring the sandbox up on their own files, so a lock holds it
+# from the ownership check to the end of the run. A lock whose run has died is taken over.
+take_sandbox_lock() {
+  local waited=0 pid
+  until mkdir "$sandbox_lock" 2>/dev/null; do
+    pid=$(cat "$sandbox_lock/pid" 2>/dev/null)
+    if [[ -n $pid ]] && ! kill -0 "$pid" 2>/dev/null; then
+      rm -rf "$sandbox_lock"
+      continue
+    fi
+    [[ $waited == 0 ]] && echo "== waiting for another scripts/ci to finish with the sandbox"
+    waited=$((waited + 1))
+    [[ $waited -ge 1200 ]] && return 1
+    sleep 1
+  done
+  have_lock=1
+  echo $$ >"$sandbox_lock/pid"
+}
+
+# The checkout a running sandbox serves: compose's own label for the directory it ran in, resolved
+# here. Docker Desktop reports a bind mount's source as its VM sees it, which is not this path.
+sandbox_owner() {
+  local dir
+  dir=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$1" 2>/dev/null)
+  [[ -n $dir ]] && (cd "$dir" 2>/dev/null && pwd -P)
+}
+
 sandbox_problem=""
 sandbox_ready() {
   have docker || { sandbox_problem="Docker is not installed"; return 1; }
   docker info >/dev/null 2>&1 || { sandbox_problem="the Docker daemon is not running"; return 1; }
-  local id source
+  take_sandbox_lock || { sandbox_problem="another scripts/ci held the sandbox for 20 minutes"; return 1; }
+  local id owner
   id=$(docker compose ps --quiet sandbox 2>/dev/null)
   if [[ -n $id ]]; then
-    source=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}' "$id" 2>/dev/null)
-    if [[ $source != "$REPO" ]]; then
-      sandbox_problem="the sandbox is serving another checkout ($source)"
+    owner=$(sandbox_owner "$id")
+    if [[ $owner != "$REPO" ]]; then
+      sandbox_problem="the sandbox is serving another checkout; scripts/sandbox down there, then run again"
       return 1
     fi
   fi
@@ -169,7 +221,8 @@ fi
 if [[ $infra == 1 ]]; then
   if have terraform; then
     check "terraform fmt" terraform fmt -no-color -check -recursive infra/gcp
-    check "terraform init" terraform -chdir=infra/gcp init -no-color -backend=false -input=false
+    check --detail "providers from the lock file" \
+      "terraform init" terraform -chdir=infra/gcp init -no-color -backend=false -input=false
     check "terraform validate" terraform -chdir=infra/gcp validate -no-color
     check "terraform test" terraform -chdir=infra/gcp test -no-color
   else
@@ -181,8 +234,10 @@ if [[ $infra == 1 ]]; then
   else
     not_run "shellcheck" "shellcheck is not installed"
   fi
-  # Prints the commands it would run and runs none: nothing reaches a cloud.
-  check "osworld-gcp dry run" scripts/osworld-gcp --dry-run status
+  # Prints the commands it would run and runs none: nothing reaches a cloud. Those commands name
+  # this machine's project, zone and instance, so they stay out of the table.
+  check --detail "prints the gcloud commands, runs none" \
+    "osworld-gcp dry run" scripts/osworld-gcp --dry-run status
 fi
 
 if [[ $mock == 1 ]]; then
@@ -192,7 +247,11 @@ if [[ $mock == 1 ]]; then
     else
       not_run "mock check" "needs uv and Chromium on PATH"
     fi
-    not_run "linux pytest" "this is Linux: the pytest row above is the Linux run"
+    if have uv; then
+      not_run "linux pytest" "this is Linux: the pytest row above is the Linux run"
+    else
+      not_run "linux pytest" "uv is not installed"
+    fi
   elif [[ $mock_here == 1 ]]; then
     if have uv; then
       check "mock check (this Mac)" uv run --frozen clicker-mock check
@@ -208,7 +267,7 @@ if [[ $mock == 1 ]]; then
     check "mock check" docker compose exec --user agent sandbox uv run --frozen clicker-mock check
     check "linux pytest" docker compose exec --user agent sandbox uv run --frozen pytest -q
   else
-    not_run "mock check" "$sandbox_problem; on this Mac only with --mock-here, after a yes"
+    not_run "mock check" "$sandbox_problem"
     not_run "linux pytest" "$sandbox_problem"
   fi
 fi
@@ -216,7 +275,7 @@ fi
 # --- the table for the pull request body -------------------------------------------------------
 
 echo
-echo "| Check | Result @ $head${dirty:+ (uncommitted changes)} | Detail |"
+echo "| Check | Result @ $head${tree_note:+ ($tree_note)} | Detail |"
 echo "|---|---|---|"
 for i in "${!names[@]}"; do
   # Escaped for a markdown table: a pipe ends a cell, and GitHub drops what reads as an HTML tag.
@@ -225,4 +284,6 @@ for i in "${!names[@]}"; do
   detail=${detail//>/"&gt;"}
   printf '| %s | %s | %s |\n' "${names[$i]}" "${states[$i]}" "$detail"
 done
+echo
+echo "Scopes: $on, from $scope_note. A scope that is off has no rows."
 exit "$failed"

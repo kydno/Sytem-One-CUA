@@ -71,7 +71,7 @@ tests/            pure logic: dates, merging, reading order, echo filter, config
                   here says the architecture cannot do that task
 osworld_overlay/  what `scripts/osworld setup` copies into OSWorld: the agent module and
                   the runner that builds it
-scripts/          `sandbox` and `osworld`
+scripts/          `ci` (the merge gate), `sandbox`, `osworld` and `osworld-gcp`
 menubar/          SystemOne.app, the menu bar front end, in Swift (see [menu bar app](menu-bar.md))
 ```
 
