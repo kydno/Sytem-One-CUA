@@ -14,13 +14,17 @@
 #   infra       infra/gcp/, scripts/osworld-gcp         terraform fmt, validate, test; shellcheck (with
 #                                                       this script); a dry run
 #   mock        typesafe_computer_use/, pyproject.toml,  clicker-mock check: every oracle, no model
-#               uv.lock, sandbox/, compose.yaml
+#               uv.lock, sandbox/, compose.yaml,
+#               scripts/sandbox
 #   linux       the same as mock                        the tests again on Linux, in the sandbox
 #
-# A change to this script, or a git error, turns every scope on. On a Mac the mock check runs in
-# scripts/sandbox, never on this machine's screen, unless --mock-here says so. On Linux (a cloud
+# A change to this script, or a git error, turns every scope on. A rename counts on both sides. On a
+# Mac the mock check runs in scripts/sandbox, which `scripts/sandbox up` builds and starts first
+# (rebuilt when its files changed), never on this machine's screen, unless --mock-here says so. On Linux (a cloud
 # session or the sandbox itself) it runs directly. A check whose tool is missing is "not run", with
-# why: never a pass. Exit 1 when a check that ran failed, 0 otherwise.
+# why: never a pass; a sandbox that fails to build or sync is a failure. Exit 1 when a check that ran
+# failed, 0 otherwise, and 2 for a bad argument. The table names the commit, and says so when the
+# tree had changes that commit does not hold.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 REPO=$(pwd)
@@ -31,7 +35,7 @@ mock_here=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all) all=1 ;;
-    --base) base=${2:?--base needs a ref}; shift ;;
+    --base) [[ $# -ge 2 ]] || { echo "scripts/ci: --base needs a ref" >&2; exit 2; }; base=$2; shift ;;
     --mock-here) mock_here=1 ;;
     -h|--help) awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
     *) echo "scripts/ci: unknown argument $1" >&2; exit 2 ;;
@@ -45,7 +49,14 @@ states=()
 details=()
 failed=0
 
-record() { names+=("$1"); states+=("$2"); details+=("$3"); }
+# record NAME STATE DETAIL. The detail goes into a public pull request body, so this checkout's path
+# and the home directory are shortened.
+record() {
+  local detail=$3 tilde='~'
+  detail=${detail//"$REPO"/.}
+  [[ -n ${HOME:-} && $HOME != / ]] && detail=${detail//"$HOME"/$tilde}
+  names+=("$1"); states+=("$2"); details+=("$detail")
+}
 
 # check NAME COMMAND...: run it, keep its output, and record the last line of output as the detail.
 check() {
@@ -62,6 +73,7 @@ check() {
     record "$name" FAILED "exit $status, full log in $log"
     failed=1
   fi
+  return "$status"
 }
 
 not_run() { printf '== %s: not run, %s\n' "$1" "$2"; record "$1" "not run" "$2"; }
@@ -82,48 +94,55 @@ if [[ $all == 1 ]]; then
 elif ! merge_base=$(git merge-base "$base" HEAD 2>/dev/null); then
   menubar=1; infra=1; mock=1
   scope_note="every scope (no merge base with $base)"
+elif ! { git diff --name-only --no-renames -z "$merge_base" >"$logs/changed" \
+         && git ls-files -z --others --exclude-standard >>"$logs/changed"; } 2>/dev/null; then
+  menubar=1; infra=1; mock=1
+  scope_note="every scope (git could not list the changes)"
 else
-  changed=$( { git diff --name-only "$merge_base" && git ls-files --others --exclude-standard; } 2>/dev/null) \
-    || { changed="scripts/ci"; }
-  while IFS= read -r path; do
+  # NUL-separated, so git neither quotes an unusual path nor folds a rename into its new name.
+  while IFS= read -r -d '' path; do
     case "$path" in
       scripts/ci) menubar=1; infra=1; mock=1 ;;
       menubar/*) menubar=1 ;;
       infra/gcp/*|scripts/osworld-gcp) infra=1 ;;
-      typesafe_computer_use/*|pyproject.toml|uv.lock|sandbox/*|compose.yaml) mock=1 ;;
+      typesafe_computer_use/*|pyproject.toml|uv.lock|sandbox/*|compose.yaml|scripts/sandbox) mock=1 ;;
     esac
-  done <<<"$changed"
+  done <"$logs/changed"
   scope_note="changes since $(git rev-parse --short "$merge_base") ($base)"
 fi
 on=python
 [[ $menubar == 1 ]] && on="$on menubar"
 [[ $infra == 1 ]] && on="$on infra"
 [[ $mock == 1 ]] && on="$on mock linux"
-echo "scripts/ci at $(git rev-parse --short HEAD)$(git diff --quiet HEAD 2>/dev/null || echo ' plus uncommitted changes')"
+head=$(git rev-parse --short HEAD)
+# Untracked files count: they are checked too, and the commit does not hold them.
+dirty=""
+[[ -n $(git status --porcelain 2>/dev/null) ]] && dirty=" plus uncommitted changes"
+echo "scripts/ci at $head$dirty"
 echo "scopes from $scope_note: $on"
 echo
 
 # --- the sandbox, for the checks that need Linux or a browser off this machine's screen ---------
 
-# The sandbox is one container for every checkout, so it may be serving another one's files.
+# The sandbox is one container for every checkout, so a running one may be serving another
+# checkout's files: that one is left alone. Otherwise `scripts/sandbox up` runs every time, not only
+# when the sandbox is down. It rebuilds the image and recreates the container when this branch
+# changed them, leaves a current one as it is, and runs uv sync. Its failure is a FAILED row: a
+# Dockerfile that no longer builds, or a dependency with no Linux wheel, is what this is here to find.
 sandbox_problem=""
 sandbox_ready() {
   have docker || { sandbox_problem="Docker is not installed"; return 1; }
   docker info >/dev/null 2>&1 || { sandbox_problem="the Docker daemon is not running"; return 1; }
   local id source
   id=$(docker compose ps --quiet sandbox 2>/dev/null)
-  if [[ -z $id ]]; then
-    echo "== starting the sandbox"
-    scripts/sandbox up >"$logs/sandbox-up.log" 2>&1 || { sandbox_problem="scripts/sandbox up failed, log in $logs/sandbox-up.log"; return 1; }
-    id=$(docker compose ps --quiet sandbox 2>/dev/null)
+  if [[ -n $id ]]; then
+    source=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}' "$id" 2>/dev/null)
+    if [[ $source != "$REPO" ]]; then
+      sandbox_problem="the sandbox is serving another checkout ($source)"
+      return 1
+    fi
   fi
-  source=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}' "$id" 2>/dev/null)
-  if [[ $source != "$REPO" ]]; then
-    sandbox_problem="the sandbox is serving another checkout ($source)"
-    return 1
-  fi
-  docker compose exec --user agent sandbox uv sync --frozen --quiet >"$logs/sandbox-sync.log" 2>&1 \
-    || { sandbox_problem="uv sync in the sandbox failed, log in $logs/sandbox-sync.log"; return 1; }
+  check "sandbox up" scripts/sandbox up || { sandbox_problem="scripts/sandbox up failed"; return 1; }
 }
 
 # --- checks ------------------------------------------------------------------------------------
@@ -173,9 +192,13 @@ if [[ $mock == 1 ]]; then
     else
       not_run "mock check" "needs uv and Chromium on PATH"
     fi
-    not_run "linux pytest" "this is Linux: pytest above covers it"
+    not_run "linux pytest" "this is Linux: the pytest row above is the Linux run"
   elif [[ $mock_here == 1 ]]; then
-    check "mock check (this Mac)" uv run --frozen clicker-mock check
+    if have uv; then
+      check "mock check (this Mac)" uv run --frozen clicker-mock check
+    else
+      not_run "mock check (this Mac)" "uv is not installed"
+    fi
     if sandbox_ready; then
       check "linux pytest" docker compose exec --user agent sandbox uv run --frozen pytest -q
     else
@@ -193,9 +216,13 @@ fi
 # --- the table for the pull request body -------------------------------------------------------
 
 echo
-echo "| Check | Result @ $(git rev-parse --short HEAD) | Detail |"
+echo "| Check | Result @ $head${dirty:+ (uncommitted changes)} | Detail |"
 echo "|---|---|---|"
 for i in "${!names[@]}"; do
-  printf '| %s | %s | %s |\n' "${names[$i]}" "${states[$i]}" "${details[$i]//|/\\|}"
+  # Escaped for a markdown table: a pipe ends a cell, and GitHub drops what reads as an HTML tag.
+  detail=${details[$i]//|/\\|}
+  detail=${detail//</"&lt;"}
+  detail=${detail//>/"&gt;"}
+  printf '| %s | %s | %s |\n' "${names[$i]}" "${states[$i]}" "$detail"
 done
 exit "$failed"
