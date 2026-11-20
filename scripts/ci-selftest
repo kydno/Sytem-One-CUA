@@ -182,11 +182,11 @@ wait "$holder"
 
 # A lock that cannot be made at all is "not run", at once, not a wait or a spin.
 ci FAKE_UNAME=Darwin SCRIPTS_CI_SANDBOX_LOCK="$scratch/no/such/dir/sandbox.lock"
-has "a lock that cannot be made" '^\| mock check \| not run \| the sandbox lock .* cannot be created'
+has "a lock that cannot be made" '^\| mock check \| not run \| cannot create the sandbox lock '
 exits "a lock that cannot be made" 0
 touch "$scratch/a-file.lock"
 ci FAKE_UNAME=Darwin SCRIPTS_CI_SANDBOX_LOCK="$scratch/a-file.lock"
-has "a file in the lock's place" '^\| mock check \| not run \| the sandbox lock .* cannot be created'
+has "a file in the lock's place" '^\| mock check \| not run \| cannot create the sandbox lock '
 
 # A run from another checkout holds the lock and the sandbox: this one says so at once.
 sleep 5 &

@@ -192,7 +192,7 @@ take_sandbox_lock() {
     if [[ ! -L $sandbox_lock ]]; then
       misses=$((misses + 1))
       if [[ $misses -ge 3 ]]; then
-        lock_problem="the sandbox lock $sandbox_lock cannot be created"
+        lock_problem="cannot create the sandbox lock $sandbox_lock"
         return 1
       fi
       continue
@@ -205,7 +205,7 @@ take_sandbox_lock() {
     [[ $waited == 0 ]] && echo "== waiting for another scripts/ci to finish with the sandbox"
     waited=$((waited + 1))
     if [[ $waited -ge 1200 ]]; then
-      lock_problem="another scripts/ci held the sandbox lock ($sandbox_lock) for 20 minutes"
+      lock_problem="another scripts/ci held the sandbox lock for 20 minutes: $sandbox_lock"
       return 1
     fi
     sleep 1
@@ -265,7 +265,11 @@ else
   failed=1
 fi
 # Not inside a self-test's own runs, which use a copy of this script and fakes.
-[[ -z ${SCRIPTS_CI_IN_SELFTEST:-} ]] && check "ci self-test" scripts/ci-selftest
+if [[ -n ${SCRIPTS_CI_IN_SELFTEST:-} ]]; then
+  not_run "ci self-test" "SCRIPTS_CI_IN_SELFTEST is set: this is one of its own runs"
+else
+  check "ci self-test" scripts/ci-selftest
+fi
 
 if [[ $menubar == 1 ]]; then
   if [[ $(uname -s) == Darwin ]] && have swift; then
