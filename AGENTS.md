@@ -91,6 +91,13 @@ needs no approval, and neither do its offline commands (`harvest`, `check`, `dig
 - A real run on this Mac, to check a change in the real app, keeps the rule above: the user approves
   each command.
 
+## PR review loop
+
+After every push to an open PR, run the review loop: wait about 2 minutes, skip if the PR was
+merged, closed, or pushed again, then run the `pr-reviewer` agent (Sonnet, extra high) with only
+`Review PR #<n> @ <head sha>.` as its prompt, post its round on the PR, fix, push, and repeat until
+it says `ready` ([CONTRIBUTING.md](CONTRIBUTING.md) § PR review loop). No round cap.
+
 ## Everything else
 
 See `CONTRIBUTING.md` for how the project works and what a pull request needs.
