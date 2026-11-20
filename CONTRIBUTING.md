@@ -83,6 +83,10 @@ checks above. The reviewer does not run them and does not report what they would
    replies as claims to verify. If the session started before the agent file existed and
    `pr-reviewer` is not in its agent list, use a general-purpose agent on Sonnet at extra high
    effort whose prompt is `Act as the agent in .claude/agents/pr-reviewer.md. Review PR #<n> @ <head sha>.`
+   followed by the `AGENTS.md` rule "Never take over the machine without explicit approval", word
+   for word, since that agent has not read the file yet. The reviewer reads both as process, not
+   notes. That agent also does not get the file's `tools` allowlist, so its read-only rule is a
+   prompt rule only: start a new session, which picks up the agent file, when you can.
 4. **Post the round on the PR.** One issue comment per round, headed
    `Claude review, round <N> @ <short sha>`, with the reviewer's output as it came back. It is a
    comment, not a GitHub review, because the PR author's account cannot request changes on or
