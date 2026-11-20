@@ -108,7 +108,8 @@ checks above. The reviewer does not run them and does not report what they would
 There is no cap on rounds. The loop ends at `ready`, pauses at `owner` until the owner answers, or
 ends when the owner closes, merges,
 or says stop. If the reviewer repeats a finding after your reply without a new reason, do not push a
-third answer: treat it as an `owner call`.
+third answer: put it to the owner with the `owner call` items, and record their answer the same
+way, as an `Owner decision` comment naming the round and finding number.
 
 ### Notes
 
